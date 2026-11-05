@@ -2,6 +2,13 @@
 #![cfg_attr(test, allow(unsafe_code))]
 
 mod metrics;
+mod pending;
+mod publication;
+use pending::PendingPublications;
+use publication::PublicationReceipts;
+pub use publication::{
+    ADOPTION_HISTORY_CAPACITY, GraphAdoption, GraphOutcome, GraphPublicationStatus,
+};
 
 pub use metrics::RealtimeMetrics;
 
@@ -15,6 +22,22 @@ use std::sync::{
     Arc, Mutex,
     atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering},
 };
+
+struct GraphUpdate {
+    graph: EngineGraph,
+    revision: u64,
+    document_revision: u64,
+    deadline: Option<daw_core::SamplePosition>,
+    slot: usize,
+    compare_mixer_deadline: bool,
+}
+struct GraphPublisher {
+    queue: Producer<GraphUpdate>,
+    next_revision: u64,
+}
+
+/// IDs remain exactly representable by `WebView` JSON consumers; zero is reserved.
+pub const MAX_PUBLICATION_REVISION: u64 = (1_u64 << 53) - 1;
 
 const GRAPH_QUEUE_CAPACITY: usize = 4;
 const TRANSPORT_QUEUE_CAPACITY: usize = 64;
@@ -155,7 +178,9 @@ impl SharedTransport {
 pub struct EngineControl {
     gain_bits: Arc<AtomicU32>,
     metrics: Arc<RealtimeMetrics>,
-    graph_updates: Arc<Mutex<Producer<EngineGraph>>>,
+    graph_updates: Arc<Mutex<GraphPublisher>>,
+    publications: Arc<PublicationReceipts>,
+    pending_publications: Arc<PendingPublications>,
     retired_graphs: Arc<Mutex<Consumer<EngineGraph>>>,
     transport_commands: Arc<Mutex<Producer<TransportRequest>>>,
     transport: Arc<SharedTransport>,
@@ -179,12 +204,130 @@ impl EngineControl {
     }
 
     pub fn submit_graph(&self, graph: EngineGraph) -> Result<(), AudioError> {
-        self.reclaim_retired()?;
-        self.graph_updates
+        self.submit_graph_revision(graph, 0, None).map(|_| ())
+    }
+
+    /// Accepted publication ID; completion is observable through `graph_publication_status`.
+    pub fn submit_graph_revision(
+        &self,
+        graph: EngineGraph,
+        document_revision: u64,
+        deadline: Option<daw_core::SamplePosition>,
+    ) -> Result<u64, AudioError> {
+        self.publish_graph(graph, document_revision, deadline, false, false)
+    }
+
+    /// Latest-wins snapshots; older still-pending replaceable updates are superseded.
+    pub fn submit_latest_graph_revision(
+        &self,
+        graph: EngineGraph,
+        document_revision: u64,
+        deadline: Option<daw_core::SamplePosition>,
+    ) -> Result<u64, AudioError> {
+        self.publish_graph(graph, document_revision, deadline, true, false)
+    }
+
+    /// Application snapshots compare mixer deadlines against the actual audible graph.
+    pub fn submit_latest_timeline(
+        &self,
+        graph: AudioGraph,
+        document_revision: u64,
+    ) -> Result<u64, AudioError> {
+        self.publish_graph(
+            EngineGraph::timeline(graph),
+            document_revision,
+            None,
+            true,
+            true,
+        )
+    }
+
+    /// True means cancellation won against callback claiming. It never undoes a document.
+    pub fn cancel_pending_graph(&self, revision: u64) -> Result<bool, AudioError> {
+        let _publisher = self
+            .graph_updates
             .lock()
-            .map_err(|_| AudioError::InvalidState("graph update lock was poisoned"))?
-            .push(graph)
-            .map_err(|_| AudioError::Backend("graph update queue is full".into()))
+            .map_err(|_| AudioError::InvalidState("graph update lock was poisoned"))?;
+        Ok(self.pending_publications.cancel(revision))
+    }
+
+    fn publish_graph(
+        &self,
+        graph: EngineGraph,
+        document_revision: u64,
+        deadline: Option<daw_core::SamplePosition>,
+        replaceable: bool,
+        compare_mixer_deadline: bool,
+    ) -> Result<u64, AudioError> {
+        self.publish_graph_owned(
+            graph,
+            document_revision,
+            deadline,
+            replaceable,
+            compare_mixer_deadline,
+        )
+        .map_err(|(_, error)| error)
+    }
+
+    /// Recover the same prepared graph on backpressure; retry without rebuilding it.
+    pub fn try_submit_latest_graph(
+        &self,
+        graph: EngineGraph,
+        document_revision: u64,
+    ) -> Result<u64, (EngineGraph, AudioError)> {
+        self.publish_graph_owned(graph, document_revision, None, true, true)
+    }
+
+    fn publish_graph_owned(
+        &self,
+        graph: EngineGraph,
+        document_revision: u64,
+        deadline: Option<daw_core::SamplePosition>,
+        replaceable: bool,
+        compare_mixer_deadline: bool,
+    ) -> Result<u64, (EngineGraph, AudioError)> {
+        if let Err(error) = self.reclaim_retired() {
+            return Err((graph, error));
+        }
+        let Ok(mut publisher) = self.graph_updates.lock() else {
+            return Err((
+                graph,
+                AudioError::InvalidState("graph update lock was poisoned"),
+            ));
+        };
+        let revision = publisher.next_revision;
+        if revision > MAX_PUBLICATION_REVISION || document_revision > MAX_PUBLICATION_REVISION {
+            return Err((
+                graph,
+                AudioError::InvalidState("graph publication revisions exhausted"),
+            ));
+        }
+        let Some(slot) = self.pending_publications.reserve(revision, replaceable) else {
+            return Err((graph, AudioError::PublicationBusy));
+        };
+        if let Err(PushError::Full(update)) = publisher.queue.push(GraphUpdate {
+            graph,
+            revision,
+            document_revision,
+            deadline,
+            slot,
+            compare_mixer_deadline,
+        }) {
+            self.pending_publications.finish(slot);
+            return Err((update.graph, AudioError::PublicationBusy));
+        }
+        // Only successful acceptance may invalidate earlier snapshots. Claiming wins races.
+        if replaceable {
+            self.pending_publications.supersede_before(revision);
+        }
+        publisher.next_revision += 1;
+        self.publications.accepted.store(revision, Ordering::SeqCst);
+        Ok(revision)
+    }
+
+    #[must_use]
+    pub fn graph_publication_status(&self, after_revision: u64) -> GraphPublicationStatus {
+        self.publications.status(after_revision)
     }
 
     /// Stop is an out-of-band barrier, independent of queue capacity and producer locks.
@@ -239,7 +382,9 @@ pub struct EngineProcessor {
     gain_bits: Arc<AtomicU32>,
     applied_gain_bits: u32,
     metrics: Arc<RealtimeMetrics>,
-    graph_updates: Consumer<EngineGraph>,
+    graph_updates: Consumer<GraphUpdate>,
+    publications: Arc<PublicationReceipts>,
+    pending_publications: Arc<PendingPublications>,
     retired_graphs: Producer<EngineGraph>,
     retired_fallback: Option<EngineGraph>,
     transport_commands: Consumer<TransportRequest>,
@@ -261,6 +406,8 @@ impl EngineProcessor {
         let (retired_producer, retired_consumer) = RingBuffer::new(GRAPH_QUEUE_CAPACITY);
         let (transport_producer, transport_consumer) = RingBuffer::new(TRANSPORT_QUEUE_CAPACITY);
         let shared_transport = Arc::new(SharedTransport::new(config.sample_rate));
+        let publications = Arc::new(PublicationReceipts::new());
+        let pending_publications = Arc::new(PendingPublications::new());
 
         let processor = Self {
             config,
@@ -269,6 +416,8 @@ impl EngineProcessor {
             applied_gain_bits: initial_gain.to_bits(),
             metrics: Arc::clone(&metrics),
             graph_updates: graph_consumer,
+            publications: Arc::clone(&publications),
+            pending_publications: Arc::clone(&pending_publications),
             retired_graphs: retired_producer,
             retired_fallback: None,
             transport_commands: transport_consumer,
@@ -279,7 +428,12 @@ impl EngineProcessor {
         let control = EngineControl {
             gain_bits,
             metrics,
-            graph_updates: Arc::new(Mutex::new(graph_producer)),
+            graph_updates: Arc::new(Mutex::new(GraphPublisher {
+                queue: graph_producer,
+                next_revision: 1,
+            })),
+            publications,
+            pending_publications,
             retired_graphs: Arc::new(Mutex::new(retired_consumer)),
             transport_commands: Arc::new(Mutex::new(transport_producer)),
             transport: shared_transport,
@@ -295,7 +449,6 @@ impl EngineProcessor {
     /// Allocation-free and lock-free processing for an interleaved output block.
     pub fn process_block(&mut self, output: &mut [f32]) {
         let started = std::time::Instant::now();
-        self.apply_graph_update();
         self.apply_stop_barrier();
         for _ in 0..TRANSPORT_QUEUE_CAPACITY {
             let Ok(request) = self.transport_commands.pop() else {
@@ -312,6 +465,8 @@ impl EngineProcessor {
         }
         // A stop arriving during command draining still wins before rendering this block.
         self.apply_stop_barrier();
+        // Adoption/deadline position must include this callback's seek/loop/stop commands.
+        self.apply_graph_update();
         let requested_gain = self.gain_bits.load(Ordering::Acquire);
         if requested_gain != self.applied_gain_bits {
             self.graph
@@ -344,12 +499,52 @@ impl EngineProcessor {
             self.retired_fallback = Some(retired);
             return;
         }
-        let Ok(next) = self.graph_updates.pop() else {
-            return;
-        };
-        let retired = std::mem::replace(&mut self.graph, next);
-        if let Err(PushError::Full(retired)) = self.retired_graphs.push(retired) {
-            self.retired_fallback = Some(retired);
+        // Four queued entries at most; skipped graph ownership is retired, never dropped here.
+        for _ in 0..GRAPH_QUEUE_CAPACITY {
+            let Ok(update) = self.graph_updates.pop() else {
+                break;
+            };
+            let GraphUpdate {
+                mut graph,
+                revision,
+                document_revision,
+                mut deadline,
+                slot,
+                compare_mixer_deadline,
+            } = update;
+            let snapshot = self.transport.snapshot();
+            let outcome = self.pending_publications.claim(slot);
+            if outcome == GraphOutcome::Adopted {
+                if let (EngineGraph::Timeline(next), EngineGraph::Timeline(previous)) =
+                    (&mut graph, &self.graph)
+                {
+                    if compare_mixer_deadline {
+                        deadline = next.mixer_edit_deadline(previous);
+                    }
+                    next.inherit_state(previous, snapshot.current_sample);
+                }
+                graph = std::mem::replace(&mut self.graph, graph);
+            }
+            if let Err(PushError::Full(graph)) = self.retired_graphs.push(graph) {
+                self.retired_fallback = Some(graph);
+            }
+            self.publications.record(GraphAdoption {
+                revision,
+                document_revision,
+                adopted_sample: (outcome == GraphOutcome::Adopted)
+                    .then_some(snapshot.current_sample),
+                resolved_sample: snapshot.current_sample,
+                outcome,
+                deadline,
+                late: outcome == GraphOutcome::Adopted
+                    && snapshot.playing
+                    && deadline.is_some_and(|position| snapshot.current_sample > position),
+                playing: snapshot.playing,
+            });
+            self.pending_publications.finish(slot);
+            if outcome == GraphOutcome::Adopted || self.retired_fallback.is_some() {
+                break;
+            }
         }
     }
 }
@@ -680,11 +875,296 @@ mod tests {
         assert!(control.transport().playing);
         assert!(output.iter().any(|sample| sample.abs() > f32::EPSILON));
     }
+    #[test]
+    fn graph_publication_preserves_pcm_and_does_not_allocate_or_free() {
+        let config = AudioConfig::DEFAULT;
+        let (mut actual, control) = EngineProcessor::prepare(config).unwrap();
+        let (mut reference, reference_control) = EngineProcessor::prepare(config).unwrap();
+        control.submit_graph(midi_graph(config)).unwrap();
+        reference_control.submit_graph(midi_graph(config)).unwrap();
+        control.send_transport(TransportCommand::Play).unwrap();
+        reference_control
+            .send_transport(TransportCommand::Play)
+            .unwrap();
+        actual.process_block(&mut [0.0; 34]);
+        reference.process_block(&mut [0.0; 34]);
+        for frames in [17, 128, 257, 1, 127, 512] {
+            let mut output = vec![0.0; frames * 2];
+            let mut expected = output.clone();
+            // Prepare outside instrumentation; only publication/render is realtime.
+            control.submit_graph(midi_graph(config)).unwrap();
+            let before = REALTIME_MEMORY_EVENTS.load(Ordering::Relaxed);
+            IN_REALTIME_TEST.with(|flag| flag.set(true));
+            actual.process_block(&mut output);
+            IN_REALTIME_TEST.with(|flag| flag.set(false));
+            assert_eq!(REALTIME_MEMORY_EVENTS.load(Ordering::Relaxed), before);
+            reference.process_block(&mut expected);
+            assert_eq!(output, expected);
+            control.reclaim_retired().unwrap();
+        }
+    }
+
+    #[test]
+    fn active_mixer_ramps_and_publication_do_not_allocate_or_free() {
+        let config = AudioConfig::DEFAULT;
+        let (mut engine, control) = EngineProcessor::prepare(config).unwrap();
+        control.submit_graph(midi_graph(config)).unwrap();
+        control.send_transport(TransportCommand::Play).unwrap();
+        engine.process_block(&mut [0.0; 34]);
+        for stage in 0..32 {
+            let EngineGraph::Timeline(mut graph) = midi_graph(config) else {
+                unreachable!()
+            };
+            let track = graph.track_mut(TrackId(1)).unwrap();
+            track.set_gain(if stage % 2 == 0 { 0.2 } else { 0.9 });
+            track.set_pan(if stage % 3 == 0 { -0.7 } else { 0.8 });
+            track.set_mute(stage % 5 == 0);
+            track.set_solo(stage % 4 == 0);
+            let position = control.transport().current_sample.0;
+            track
+                .set_mixer_events(&[
+                    daw_mixer::MixerEvent {
+                        id: 1,
+                        position: SamplePosition(position + 1),
+                        change: daw_mixer::MixerChange::Gain(0.4),
+                    },
+                    daw_mixer::MixerEvent {
+                        id: 2,
+                        position: SamplePosition(position + 3),
+                        change: daw_mixer::MixerChange::Pan(-0.5),
+                    },
+                    daw_mixer::MixerEvent {
+                        id: 3,
+                        position: SamplePosition(position + 5),
+                        change: daw_mixer::MixerChange::Mute(true),
+                    },
+                    daw_mixer::MixerEvent {
+                        id: 4,
+                        position: SamplePosition(position + 7),
+                        change: daw_mixer::MixerChange::Mute(false),
+                    },
+                    daw_mixer::MixerEvent {
+                        id: 5,
+                        position: SamplePosition(position + 11),
+                        change: daw_mixer::MixerChange::Solo(true),
+                    },
+                ])
+                .unwrap();
+            graph.set_master_gain(if stage % 2 == 0 { 0.7 } else { 1.0 });
+            control.submit_graph(EngineGraph::timeline(graph)).unwrap();
+            let mut output = [0.0; 34];
+            let before = REALTIME_MEMORY_EVENTS.load(Ordering::Relaxed);
+            IN_REALTIME_TEST.with(|flag| flag.set(true));
+            engine.process_block(&mut output);
+            IN_REALTIME_TEST.with(|flag| flag.set(false));
+            assert_eq!(REALTIME_MEMORY_EVENTS.load(Ordering::Relaxed), before);
+            assert!(output.iter().all(|sample| sample.is_finite()));
+            control.reclaim_retired().unwrap();
+        }
+    }
+
+    #[test]
+    fn canceled_and_coalesced_graphs_preserve_pcm_without_callback_allocation_or_free() {
+        let config = AudioConfig::DEFAULT;
+        let (mut actual, control) = EngineProcessor::prepare(config).unwrap();
+        let (mut reference, reference_control) = EngineProcessor::prepare(config).unwrap();
+        for ctl in [&control, &reference_control] {
+            ctl.submit_graph(midi_graph(config)).unwrap();
+            ctl.send_transport(TransportCommand::SetLoop(daw_core::SampleRange::new(
+                SamplePosition(7),
+                SamplePosition(131),
+            )))
+            .unwrap();
+            ctl.send_transport(TransportCommand::Play).unwrap();
+        }
+        actual.process_block(&mut [0.0; 34]);
+        reference.process_block(&mut [0.0; 34]);
+        for frames in [1, 17, 64, 127, 128, 257, 512, 1] {
+            for document in 1..=4 {
+                let EngineGraph::Timeline(mut graph) = midi_graph(config) else {
+                    unreachable!()
+                };
+                graph
+                    .track_mut(TrackId(1))
+                    .unwrap()
+                    .set_mixer_events(&[
+                        daw_mixer::MixerEvent {
+                            id: 7,
+                            position: SamplePosition(3000),
+                            change: daw_mixer::MixerChange::Gain(0.8),
+                        },
+                        daw_mixer::MixerEvent {
+                            id: 3,
+                            position: SamplePosition(3500),
+                            change: daw_mixer::MixerChange::Mute(false),
+                        },
+                    ])
+                    .unwrap(); // Outside the loop, but exercises nonempty deadline indexes and ownership.
+                let revision = control.submit_latest_timeline(graph, document).unwrap();
+                if document == 1 {
+                    assert!(control.cancel_pending_graph(revision).unwrap());
+                }
+            }
+            let mut output = vec![0.0; frames * 2];
+            let mut expected = output.clone();
+            let before = REALTIME_MEMORY_EVENTS.load(Ordering::Relaxed);
+            IN_REALTIME_TEST.with(|flag| flag.set(true));
+            actual.process_block(&mut output);
+            IN_REALTIME_TEST.with(|flag| flag.set(false));
+            assert_eq!(REALTIME_MEMORY_EVENTS.load(Ordering::Relaxed), before);
+            reference.process_block(&mut expected);
+            assert_eq!(output, expected);
+            let status = control.graph_publication_status(0);
+            assert!(!status.pending);
+            assert_eq!(status.adopted_revision, status.accepted_revision);
+            control.reclaim_retired().unwrap();
+        }
+    }
+
+    fn render_engine_partitions(partitions: &[usize], looping: bool) -> (Vec<f32>, u64) {
+        let config = AudioConfig::DEFAULT;
+        let (mut engine, control) = EngineProcessor::prepare(config).unwrap();
+        control.submit_graph(midi_graph(config)).unwrap();
+        if looping {
+            control
+                .send_transport(TransportCommand::SetLoop(daw_core::SampleRange::new(
+                    SamplePosition(7),
+                    SamplePosition(130),
+                )))
+                .unwrap();
+        }
+        control
+            .send_transport(TransportCommand::Seek(SamplePosition(5)))
+            .unwrap();
+        control.send_transport(TransportCommand::Play).unwrap();
+        let mut output = vec![0.0; 4096];
+        let mut frame = 0;
+        let mut block = 0;
+        while frame < 2048 {
+            let count = partitions[block % partitions.len()].min(2048 - frame);
+            engine.process_block(&mut output[frame * 2..(frame + count) * 2]);
+            frame += count;
+            block += 1;
+        }
+        (output, control.transport().current_sample.0)
+    }
+    #[test]
+    fn full_engine_midi_automation_and_loop_output_is_partition_invariant() {
+        for looping in [false, true] {
+            let expected = render_engine_partitions(&[2048], looping);
+            for blocks in [&[1][..], &[17, 64, 127, 128, 257, 512, 1024][..]] {
+                assert_eq!(render_engine_partitions(blocks, looping), expected);
+            }
+        }
+    }
 }
 
 #[cfg(test)]
 mod p0_regressions {
     use super::*;
+    #[test]
+    fn publication_receipts_distinguish_acceptance_adoption_and_actual_seek_deadlines() {
+        use daw_core::SamplePosition;
+        let config = AudioConfig::DEFAULT;
+        let (mut processor, control) = EngineProcessor::prepare(config).unwrap();
+        let first = control
+            .submit_graph_revision(EngineGraph::test_tone(config), 7, Some(SamplePosition(128)))
+            .unwrap();
+        let pending = control.graph_publication_status(0);
+        assert_eq!(pending.accepted_revision, first);
+        assert_eq!(pending.adopted_revision, 0);
+        assert!(pending.acknowledgements.is_empty());
+        control
+            .send_transport(TransportCommand::Seek(SamplePosition(128)))
+            .unwrap();
+        control.send_transport(TransportCommand::Play).unwrap();
+        processor.process_block(&mut [0.0; 2]);
+        let ack = control.graph_publication_status(0).acknowledgements[0];
+        assert_eq!(ack.document_revision, 7);
+        assert_eq!(ack.adopted_sample, Some(SamplePosition(128)));
+        assert!(!ack.late); // equality is on time
+        let second = control
+            .submit_graph_revision(EngineGraph::test_tone(config), 3, Some(SamplePosition(128)))
+            .unwrap();
+        processor.process_block(&mut [0.0; 2]);
+        let status = control.graph_publication_status(first);
+        assert_eq!(status.adopted_revision, second);
+        assert_eq!(status.late_count, 1);
+        assert!(status.acknowledgements[0].late);
+        assert_eq!(
+            status.acknowledgements[0].adopted_sample,
+            Some(SamplePosition(129))
+        );
+        assert_eq!(status.acknowledgements[0].document_revision, 3); // history can move backwards
+        control.send_transport(TransportCommand::Stop).unwrap();
+        control
+            .submit_graph_revision(EngineGraph::test_tone(config), 9, Some(SamplePosition(0)))
+            .unwrap();
+        processor.process_block(&mut [0.0; 2]);
+        let ack = control.graph_publication_status(second).acknowledgements[0];
+        assert!(!ack.playing && !ack.late);
+        assert_eq!(control.graph_publication_status(0).late_count, 1);
+    }
+
+    #[test]
+    fn retirement_backpressure_does_not_acknowledge_a_graph_that_is_still_pending() {
+        let config = AudioConfig::DEFAULT;
+        let (mut processor, control) = EngineProcessor::prepare(config).unwrap();
+        control
+            .submit_graph_revision(EngineGraph::test_tone(config), 1, None)
+            .unwrap();
+        control
+            .submit_graph_revision(EngineGraph::test_tone(config), 2, None)
+            .unwrap();
+        for _ in 0..GRAPH_QUEUE_CAPACITY {
+            assert!(
+                processor
+                    .retired_graphs
+                    .push(EngineGraph::test_tone(config))
+                    .is_ok()
+            );
+        }
+        processor.process_block(&mut [0.0; 2]);
+        assert_eq!(control.graph_publication_status(0).adopted_revision, 1);
+        processor.process_block(&mut [0.0; 2]);
+        assert_eq!(control.graph_publication_status(0).adopted_revision, 1);
+        assert_eq!(control.graph_publication_status(0).accepted_revision, 2);
+        control.reclaim_retired().unwrap();
+        processor.process_block(&mut [0.0; 2]);
+        assert_eq!(control.graph_publication_status(0).adopted_revision, 2);
+    }
+
+    #[test]
+    fn full_queues_and_exhausted_revision_ids_do_not_create_false_acceptance() {
+        let config = AudioConfig::DEFAULT;
+        let (mut processor, control) = EngineProcessor::prepare(config).unwrap();
+        for document in 0..4 {
+            control
+                .submit_graph_revision(EngineGraph::test_tone(config), document, None)
+                .unwrap();
+        }
+        assert!(
+            control
+                .submit_graph_revision(EngineGraph::test_tone(config), 99, None)
+                .is_err()
+        );
+        assert_eq!(control.graph_publication_status(0).accepted_revision, 4);
+        processor.process_block(&mut [0.0; 2]);
+        assert_eq!(
+            control
+                .submit_graph_revision(EngineGraph::test_tone(config), 8, None)
+                .unwrap(),
+            5
+        );
+        control.graph_updates.lock().unwrap().next_revision = MAX_PUBLICATION_REVISION + 1;
+        assert!(
+            control
+                .submit_graph_revision(EngineGraph::test_tone(config), 8, None)
+                .is_err()
+        );
+        assert_eq!(control.graph_publication_status(0).accepted_revision, 5);
+    }
+
     #[test]
     fn stop_is_accepted_when_the_transport_queue_is_full() {
         let (mut processor, control) = EngineProcessor::prepare(AudioConfig::DEFAULT).unwrap();
@@ -760,3 +1240,6 @@ mod p0_regressions {
         }
     }
 }
+
+#[cfg(test)]
+mod coalescing_tests;

@@ -8,6 +8,7 @@
     "build": "vite build",
     "preview": "vite preview",
     "tauri": "tauri",
+    "test:mixer": "node --test tests/mixer-events.test.mjs",
     "test:midi": "node --test tests/midi-editor.test.mjs"
   },
   "dependencies": {

@@ -12,6 +12,7 @@ daw-dsp = { path = "../dsp" }
 daw-core = { path = "../daw-core" }
 daw-mixer = { path = "../mixer" }
 rtrb = "0.3.4"
+serde = { version = "1", features = ["derive"] }
 
 [dev-dependencies]
 audio-clip = { path = "../audio-clip" }

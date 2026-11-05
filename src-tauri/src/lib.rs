@@ -283,6 +283,47 @@ fn set_track_solo(
 }
 
 #[tauri::command]
+fn get_graph_publication_status(
+    after_revision: u64,
+    state: State<'_, ApplicationState>,
+) -> Result<daw_app::PublicationStatus, String> {
+    state
+        .application
+        .lock()
+        .map_err(|_| "application state lock was poisoned".to_owned())?
+        .service_publications(after_revision)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn set_mixer_event(
+    track_id: u64,
+    event: daw_project::MixerEvent,
+    state: State<'_, ApplicationState>,
+) -> Result<ProjectSnapshot, String> {
+    state
+        .application
+        .lock()
+        .map_err(|_| "application state lock was poisoned".to_owned())?
+        .set_mixer_event(track_id, event)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn remove_mixer_event(
+    track_id: u64,
+    event_id: u64,
+    state: State<'_, ApplicationState>,
+) -> Result<ProjectSnapshot, String> {
+    state
+        .application
+        .lock()
+        .map_err(|_| "application state lock was poisoned".to_owned())?
+        .remove_mixer_event(track_id, event_id)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 fn reorder_tracks(
     track_ids: Vec<u64>,
     state: State<'_, ApplicationState>,
@@ -443,7 +484,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .manage(ApplicationState {
-            application: Mutex::new(DawApplication::new()),
+            application: Mutex::new(DawApplication::new_with_background_preparation()),
             backend: CpalAudioBackend,
         })
         .invoke_handler(tauri::generate_handler![
@@ -470,6 +511,9 @@ pub fn run() {
             set_track_mute,
             set_track_solo,
             reorder_tracks,
+            set_mixer_event,
+            get_graph_publication_status,
+            remove_mixer_event,
             edit_midi_clip,
             edit_midi_clips,
             edit_midi_notes,

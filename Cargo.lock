@@ -135,6 +135,7 @@ dependencies = [
  "daw-midi",
  "daw-mixer",
  "rtrb",
+ "serde",
 ]
 
 [[package]]
@@ -673,6 +674,7 @@ dependencies = [
  "audio-clip",
  "audio-types",
  "daw-core",
+ "serde",
 ]
 
 [[package]]

@@ -29,6 +29,7 @@ impl GainNode {
         }
     }
 
+    #[allow(clippy::float_cmp)] // Even sub-epsilon target edits must start a ramp.
     pub fn set_gain(&mut self, linear_gain: f32) {
         let target = sanitize_gain(linear_gain);
         if target != self.target {
@@ -55,7 +56,7 @@ impl AudioProcessor for GainNode {
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     fn prepare(&mut self, sample_rate: f32, _channels: usize) {
         // Audio sample rates are small positive integral values represented as f32 by the DSP API.
-        self.smoothing_samples = (sample_rate * 0.005).max(1.0) as u32;
+        self.smoothing_samples = (sample_rate * 0.005).round().max(1.0) as u32;
         if self.remaining_samples > 0 {
             self.restart_ramp();
         }
@@ -152,5 +153,25 @@ mod p0_regressions {
                 "partition-dependent gain ramp: {partitions:?}"
             );
         }
+    }
+    #[test]
+    fn ramp_duration_endpoint_and_small_changes_are_exact() {
+        let mut node = GainNode::new(0.0);
+        node.prepare(48000.0, 2);
+        node.set_gain(1.0);
+        node.process(&mut [1.0; 478], 2);
+        assert!(node.current_gain() < 1.0);
+        node.process(&mut [1.0; 2], 2);
+        assert!((node.current_gain() - 1.0).abs() < f32::EPSILON);
+        node.set_gain(0.0);
+        node.process(&mut [1.0; 480], 2);
+        assert!(node.current_gain().abs() < f32::EPSILON);
+        node.prepare(200.0, 1);
+        node.set_gain(f32::EPSILON / 4.0);
+        node.process(&mut [1.0; 1], 1);
+        assert_eq!(
+            node.current_gain().to_bits(),
+            (f32::EPSILON / 4.0).to_bits()
+        );
     }
 }

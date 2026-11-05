@@ -10,14 +10,14 @@ See the [detailed roadmap](ROADMAP.md) for implementation status, priorities, fe
 
 ## Implemented functionality
 
-- **Audio foundation:** independent Rust engine; backend abstraction; CPAL output and a mock backend; prepared graphs; bounded graph/transport queues; off-callback graph reclamation.
+- **Audio foundation:** independent Rust engine; backend abstraction; CPAL output and a mock backend; prepared graphs; bounded graph/transport queues; off-callback graph reclamation; epoch-scoped graph resolution receipts, latest-wins pending snapshot coalescing, cancelable single-worker graph preparation, and scheduled-edit deadline warnings.
 - **Transport:** integer sample positions, play/pause, seek, loop ranges, tempo and time-signature state. Recording state exists in the model; audio capture is not implemented.
 - **Audio sources:** immutable PCM assets, non-destructive audio clip ranges, background WAV decoding, bounded read-ahead streaming, and min/max/RMS waveform analysis. These building blocks are not yet a complete audio-import/recording editor.
-- **Mixing:** track gain, pan, mute/solo, master gain, and timeline-aligned audio rendering. Reusable mixer controls are integrated into the arrangement and inspector.
+- **Mixing:** track gain, pan, mute/solo, master gain, timeline-aligned audio rendering, and persistent sample-position Gain/Pan/Mute/Solo events through the native editing API. Reusable mixer controls are integrated into the arrangement and inspector.
 - **MIDI:** sample-position scheduling and a small reference instrument; note creation, movement, resizing, transposition, velocity edits, selection/marquee selection, deletion, and grid quantization.
 - **Multiple clips:** MIDI clip creation and selection; project-time note editing across clips and tracks; clip movement, independent duplication, edge trimming, and playhead splitting.
 - **History:** Rust-owned Undo/Redo with up to 100 history entries, coalesced continuous parameter edits, and one history step per committed gesture or batch operation.
-- **Persistence:** self-contained `.ongaku` projects with PCM, MIDI, automation, and mixer settings; Save/Save As/Open; validation before document replacement; temporary-file writing and atomic replacement after flushing/synchronizing the file.
+- **Persistence:** self-contained `.ongaku` projects (versions 1/2) with PCM, MIDI, automation, and mixer settings; Save/Save As/Open; validation before document replacement; temporary-file writing and atomic replacement after flushing/synchronizing the file.
 - **Automation:** prepared linear/step lanes and instrument-level automation editing. Full channel/plugin automation and recording modes are planned.
 - **Interface:** dense arrangement workspace, inspector, piano roll, project browser, transport, telemetry, and English, Japanese, and Simplified Chinese UI text.
 - **Development preview:** the UI can run without Tauri through a preview adapter. Preview projects use browser local storage, separate from native `.ongaku` files.
@@ -50,7 +50,7 @@ AudioBackend abstraction
 Audio device
 ```
 
-The engine and project crates do not depend on Tauri. Control-side mutexes are separate from the realtime callback; the current callback consumes prepared messages through bounded queues.
+The engine and project crates do not depend on Tauri. Desktop edits commit the Rust document/history and request a bounded background preparation worker; stale work is cooperatively canceled before publication. Preparation, queue acceptance and actual adoption have distinct status/IDs. Control-side mutexes are separate from the realtime callback, which consumes prepared messages through bounded queues. The synchronous Rust control API remains available.
 
 Heavy rendering and GPU work are planned for a Rust-owned renderer using **wgpu**, with resources kept on the Rust/GPU side. Current timeline and piano-roll rendering uses WebView Canvas. Rust-owned workspace state, native docking, floating panels, and multi-window synchronization are planned, not implemented by the present panel toggles.
 
@@ -95,6 +95,7 @@ cargo fmt --all --check
 cargo test --workspace
 cargo clippy --workspace --all-targets
 npm run test:midi
+npm run test:mixer
 npm run build
 ```
 
@@ -117,10 +118,10 @@ The current Clippy run reports existing warnings. A warning-clean release baseli
 
 ## Current limits
 
-- The reference instrument is a small 16-voice implementation. Robust overlapping-unison note ownership, sustain/controller reconstruction, and production-grade instruments remain priorities.
-- Live project edits build fresh graphs. General voice/effect-tail continuity and click-free live reconfiguration need dedicated state-transfer work and expanded tests.
+- The reference instrument is a small 16-voice implementation. Per-note ownership handles overlapping unison notes and deterministic voice stealing. Sustain/controller reconstruction, live-edit continuity, and production-grade instruments remain priorities.
+- Live project edits build prepared graphs and inherit compatible reference-instrument voices at publication. Unchanged notes keep phase through edits and Undo/Redo; changed notes are reconciled by stable identity. Track Gain/Pan/Mute/Solo use sample-counted 5 ms ramps that survive publication and history edits; prepared-graph master Gain also ramps. General effect-tail/stream continuity remains unfinished.
 - Callback telemetry includes duration, a histogram-based P99.9 estimate, callback deadline exceedances, and backend errors. Its xrun field is not a complete measurement of driver underruns or physical round-trip latency.
-- `.ongaku` version 1 stores JSON with embedded PCM and currently limits input files to 512 MiB. Media deduplication, compression, autosave/recovery, and background file-operation progress are planned. Undo history is not saved.
+- `.ongaku` stores JSON with embedded PCM; projects containing scheduled mixer events use version 2, while event-free projects use version 1. The new reader accepts both versions and currently limits input files to 512 MiB. Media deduplication, compression, autosave/recovery, and background file-operation progress are planned. Undo history is not saved.
 - MIDI trimming removes or shortens notes outside the new range. Undo restores the previous state; extending a trimmed edge adds silence and does not recover discarded notes. A persistent source-window model is planned for non-destructive MIDI trimming.
 - MIDI splits divide crossing notes into left/right notes; the right side retriggers. Sustain/tie-preserving split behavior is planned.
 - Clip duplication stays within the current project length; copies may overlap when insufficient space remains. Track-to-track clip dragging and automatic project extension are planned.
@@ -130,6 +131,10 @@ The current Clippy run reports existing warnings. A warning-clean release baseli
 ## Documentation
 
 - [Detailed product and reliability roadmap](ROADMAP.md): authoritative forward plan and release gates.
+- [Cancelable background graph preparation](docs/GRAPH_PREPARATION.md): request IDs, history/persistence semantics, cancellation checkpoints, bounded retry and failure handling.
+- [Graph adoption and deadline protocol](docs/GRAPH_PUBLICATION.md): accepted/adopted revisions, history mapping, bounded receipts, and timing notices.
+- [Sample-position mixer event API](docs/MIXER_EVENTS.md): scheduling, history, loop/seek behavior, and file compatibility.
+- [P0 validation record](docs/P0_VALIDATION.md): playback fixes, regression evidence, and remaining qualification gaps.
 - [Implemented editing workflows](docs/REFERENCE_ROADMAP.md): chronological implementation notes, behavior, and validation details, currently in Japanese.
 - [Architecture specification](docs/Cross-Platform%20Rust%20DAW%20Architecture%20Specification.md): original architecture direction.
 - [Screen design](docs/SCREEN_DESIGN.md): interface structure and rendering limitations.

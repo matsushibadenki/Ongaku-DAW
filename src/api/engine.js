@@ -10,7 +10,8 @@ import { applyNoteSelection } from "../utils/midi.js";
 /** @typedef {{id: number, timelineStart: number, durationSamples: number, notes: MidiNote[]}} MidiClip */
 /** @typedef {{id: number, position: number, value: number, curve: "step"|"linear"}} AutomationPoint */
 /** @typedef {{id: number, parameter: string, minimum: number, maximum: number, defaultValue: number, points: AutomationPoint[]}} AutomationLane */
-/** @typedef {{id: number, role: "rhythm"|"bass"|"atmosphere"|"lead", gain: number, pan: number, muted: boolean, solo: boolean, clips: ProjectClip[], midiClips: MidiClip[], automationLanes: AutomationLane[]}} ProjectTrack */
+/** @typedef {{id: number, position: number, change: {parameter: "gain"|"pan"|"mute"|"solo", value: number|boolean}}} MixerEvent */
+/** @typedef {{id: number, role: "rhythm"|"bass"|"atmosphere"|"lead", gain: number, pan: number, muted: boolean, solo: boolean, clips: ProjectClip[], midiClips: MidiClip[], automationLanes: AutomationLane[], mixerEvents?: MixerEvent[]}} ProjectTrack */
 /** @typedef {{name: string, sampleRate: number, tempoBpm: number, timeSignature: {numerator: number, denominator: number}, lengthSamples: number, tracks: ProjectTrack[]}} ProjectSnapshot */
 /** @typedef {{currentSample: number, sampleRate: number, tempoBpm: number, timeSignature: {numerator: number, denominator: number}, playing: boolean, recording: boolean, loopRange: null|{start: number, end: number}}} TransportSnapshot */
 
@@ -120,7 +121,7 @@ function editPreviewAutomation(trackId, laneId, pointId, value) {
 }
 
 const previewHistory = { undo: [], redo: [], saved: null, path: null };
-const previewEdits = new Set(["set_track_gain", "set_track_pan", "set_track_mute", "set_track_solo",
+const previewEdits = new Set(["set_mixer_event", "remove_mixer_event", "set_track_gain", "set_track_pan", "set_track_mute", "set_track_solo",
   "reorder_tracks", "edit_midi_clips", "edit_midi_notes", "add_midi_clip", "edit_midi_selection", "write_midi_note", "edit_midi_clip", "set_midi_note_velocity", "set_automation_point_value"]);
 const previewStatus = () => ({ canUndo: previewHistory.undo.length > 0, canRedo: previewHistory.redo.length > 0,
   dirty: JSON.stringify(preview.project) !== previewHistory.saved, path: previewHistory.path });
@@ -160,6 +161,7 @@ async function previewDocumentInvoke(command, args) {
 
 function previewInvoke(command, args = {}) {
   switch (command) {
+    case "get_graph_publication_status": return Promise.resolve({ documentRevision: 0, requestedRevision: null, engineEpoch: 0, engine: null, preparation: null });
     case "list_output_devices": return Promise.resolve([{ id: "preview", name: "Preview Output", isDefault: true }]);
     case "default_output_config": return Promise.resolve({ sampleRate: 48_000, channels: 2, bufferSize: 128 });
     case "configure_project":
@@ -175,6 +177,30 @@ function previewInvoke(command, args = {}) {
     case "set_transport_loop":
       preview.transport.loopRange = args.enabled ? { start: args.startSample, end: args.endSample } : null;
       return Promise.resolve();
+    case "set_mixer_event":
+    case "remove_mixer_event": {
+      const track = preview.project.tracks.find((track) => track.id === args.trackId);
+      if (!track) throw new Error("Track not found");
+      let events = [...(track.mixerEvents ?? [])];
+      if (command === "set_mixer_event") {
+        const event = args.event;
+        const change = event?.change;
+        const validValue = change?.parameter === "gain" ? Number.isFinite(change.value) && change.value >= 0 && change.value <= 2
+          : change?.parameter === "pan" ? Number.isFinite(change.value) && change.value >= -1 && change.value <= 1
+            : ["mute", "solo"].includes(change?.parameter) && typeof change.value === "boolean";
+        if (!Number.isSafeInteger(event?.id) || event.id < 0 || !Number.isSafeInteger(event.position)
+          || event.position < 0 || event.position >= preview.project.lengthSamples || !validValue) throw new Error("Invalid mixer event");
+        const index = events.findIndex((item) => item.id === event.id);
+        if (index >= 0) events[index] = structuredClone(event); else events.push(structuredClone(event));
+        if (events.length > 4096) throw new Error("Mixer event limit exceeded");
+        events.sort((a, b) => a.position - b.position || a.id - b.id);
+      } else {
+        if (!events.some((event) => event.id === args.eventId)) throw new Error("Mixer event not found");
+        events = events.filter((event) => event.id !== args.eventId);
+      }
+      preview.project = { ...preview.project, tracks: preview.project.tracks.map((item) => item.id === args.trackId ? { ...item, mixerEvents: events } : item) };
+      return structuredClone(preview.project);
+    }
     case "set_track_gain": editPreviewTrack(args.trackId, { gain: args.gain }); return Promise.resolve();
     case "set_track_pan": editPreviewTrack(args.trackId, { pan: args.pan }); return Promise.resolve();
     case "set_track_mute": editPreviewTrack(args.trackId, { muted: args.muted }); return Promise.resolve();
@@ -271,6 +297,19 @@ export const engineApi = {
   seek: (sample) => invoke("seek_transport", { sample: Math.max(0, Math.round(sample)) }),
   /** @param {boolean} enabled @param {number} startSample @param {number} endSample */
   setLoop: (enabled, startSample, endSample) => invoke("set_transport_loop", { enabled, startSample, endSample }),
+  /** @param {number} trackId @param {MixerEvent} event @returns {Promise<ProjectSnapshot>} */
+  setMixerEvent: (trackId, event) => {
+    if (![trackId, event?.id, event?.position].every((value) => Number.isSafeInteger(value) && value >= 0)) {
+      return Promise.reject(new Error("Mixer event IDs and positions must be safe nonnegative integers"));
+    }
+    return invoke("set_mixer_event", { trackId, event });
+  },
+  removeMixerEvent: (trackId, eventId) => {
+    if (![trackId, eventId].every((value) => Number.isSafeInteger(value) && value >= 0)) {
+      return Promise.reject(new Error("Mixer event IDs must be safe nonnegative integers"));
+    }
+    return invoke("remove_mixer_event", { trackId, eventId });
+  },
   /** @param {number} trackId @param {number} gain */
   setTrackGain: (trackId, gain) => invoke("set_track_gain", { trackId, gain }),
   /** @param {number} trackId @param {number} pan */
@@ -290,6 +329,9 @@ export const engineApi = {
   addMidiClip: (trackId, start, durationSamples) => invoke("add_midi_clip", { trackId, start, durationSamples }),
   editMidiSelection: (trackId, clipId, noteIds, edit) => invoke("edit_midi_selection", { trackId, clipId, noteIds, edit }),
   writeMidiNote: (trackId, clipId, noteId, start, durationSamples, key) => invoke("write_midi_note", { trackId, clipId, noteId, start, durationSamples, key }),
+  publicationStatus: (afterRevision = 0) => Number.isSafeInteger(afterRevision) && afterRevision >= 0
+    ? invoke("get_graph_publication_status", { afterRevision })
+    : Promise.reject(new Error("Publication revision must be a safe nonnegative integer")),
   documentStatus: () => invoke("get_document_status"),
   undo: () => invoke("undo_project"),
   redo: () => invoke("redo_project"),

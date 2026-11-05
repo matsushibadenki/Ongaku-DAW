@@ -1,5 +1,8 @@
 //! Shared, backend-independent contracts for the audio system.
 
+mod preparation;
+pub use preparation::{PreparationCheck, PreparationToken, preparation_sort_by};
+
 use serde::{Deserialize, Serialize};
 use std::fmt::{Display, Formatter};
 
@@ -85,6 +88,8 @@ pub struct RealtimeMetricsSnapshot {
 /// Errors cross the non-realtime control boundary only.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AudioError {
+    PreparationCanceled,
+    PublicationBusy,
     InvalidConfig(&'static str),
     Backend(String),
     InvalidState(&'static str),
@@ -94,6 +99,8 @@ pub enum AudioError {
 impl Display for AudioError {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::PreparationCanceled => formatter.write_str("graph preparation canceled"),
+            Self::PublicationBusy => formatter.write_str("graph publication queue is busy"),
             Self::InvalidConfig(message) | Self::InvalidState(message) => {
                 formatter.write_str(message)
             }

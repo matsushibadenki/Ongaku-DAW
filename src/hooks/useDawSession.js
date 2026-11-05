@@ -11,6 +11,8 @@ export function useDawSession(unavailableMessage) {
   const [project, setProject] = useState(null);
   const [transport, setTransport] = useState(null);
   const [metrics, setMetrics] = useState(null);
+  const [publicationStatus, setPublicationStatus] = useState(null);
+  const [timingWarning, setTimingWarning] = useState("");
   const [running, setRunning] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -47,14 +49,40 @@ export function useDawSession(unavailableMessage) {
   useEffect(() => {
     if (!running) return undefined;
     let active = true;
+    let inFlight = false;
+    let cursor = 0;
+    let epoch = null;
+    let lateCount = 0;
+    let preparationFailure = null;
     const poll = window.setInterval(() => {
-      Promise.all([engineApi.transport(), engineApi.metrics()])
-        .then(([nextTransport, nextMetrics]) => {
+      if (inFlight) return;
+      inFlight = true;
+      Promise.all([engineApi.transport(), engineApi.metrics(), engineApi.publicationStatus(cursor)])
+        .then(([nextTransport, nextMetrics, nextPublication]) => {
           if (!active) return;
           setTransport(nextTransport);
           setMetrics(nextMetrics);
+          setPublicationStatus(nextPublication);
+          if (epoch !== nextPublication.engineEpoch) {
+            epoch = nextPublication.engineEpoch;
+            lateCount = 0;
+            preparationFailure = null;
+          }
+          const failure = nextPublication.preparation?.failure;
+          if (failure && failure.preparationRevision !== preparationFailure) {
+            preparationFailure = failure.preparationRevision;
+            reportError(failure.message);
+          }
+          const engine = nextPublication.engine;
+          if (engine) {
+            if (engine.lateCount > lateCount) setTimingWarning("late");
+            else if (engine.historyLost) setTimingWarning((previous) => previous || "history");
+            lateCount = engine.lateCount;
+            cursor = engine.settledRevision ?? engine.adoptedRevision;
+          } else cursor = 0;
         })
-        .catch(reportError);
+        .catch((reason) => { if (active) reportError(reason); })
+        .finally(() => { inFlight = false; });
     }, 100);
     return () => { active = false; window.clearInterval(poll); };
   }, [reportError, running]);
@@ -85,6 +113,8 @@ export function useDawSession(unavailableMessage) {
       setRunning(false);
       setTransport(null);
       setMetrics(null);
+      setPublicationStatus(null);
+      setTimingWarning("");
     } catch (reason) {
       reportError(reason);
     } finally {
@@ -171,6 +201,7 @@ export function useDawSession(unavailableMessage) {
         if (loaded) {
           setProjectEpoch(value => value + 1);
           setRunning(false); setTransport(null); setMetrics(null);
+          setPublicationStatus(null); setTimingWarning(""); setError("");
           setConfig((current) => ({ ...current, sampleRate: loaded.sampleRate }));
         }
       } else if (action === "undo") await engineApi.undo();
@@ -185,7 +216,7 @@ export function useDawSession(unavailableMessage) {
 
   return {
     devices, deviceId, setDeviceId, config, project, projectEpoch, transport, metrics, documentStatus,
-    running, busy, error, setError, toggleEngine, togglePlayback, stopPlayback, seek, toggleLoop,
+    running, busy, error, setError, publicationStatus, timingWarning, dismissTimingWarning: () => setTimingWarning(""), toggleEngine, togglePlayback, stopPlayback, seek, toggleLoop,
     undo: () => documentAction("undo"), redo: () => documentAction("redo"),
     saveProject: (saveAs = false) => documentAction("save", saveAs),
     loadProject: () => documentAction("open"),

@@ -48,7 +48,15 @@ impl Project {
     pub fn save(&self, path: &Path) -> Result<(), AudioError> {
         let document = Document {
             format: "ongaku-project".into(),
-            version: 1,
+            version: if self
+                .tracks
+                .iter()
+                .any(|track| !track.mixer_events.is_empty())
+            {
+                2
+            } else {
+                1
+            },
             project: self.snapshot(),
             media: self
                 .tracks
@@ -80,7 +88,8 @@ impl Project {
         let file = File::open(path).map_err(failure)?;
         require(file.metadata().map_err(failure)?.len() <= 512 * 1024 * 1024)?;
         let document: Document = serde_json::from_reader(BufReader::new(file)).map_err(failure)?;
-        require(document.format == "ongaku-project" && document.version == 1)?;
+        require(document.format == "ongaku-project" && matches!(document.version, 1 | 2))?;
+        let version = document.version;
         let snapshot = document.project;
         require(
             (8_000..=192_000).contains(&snapshot.sample_rate)
@@ -90,10 +99,24 @@ impl Project {
                 && snapshot.length_samples > 0
                 && snapshot.tracks.len() <= 1024,
         )?;
+        require(
+            version == 2
+                || snapshot
+                    .tracks
+                    .iter()
+                    .all(|track| track.mixer_events.is_empty()),
+        )?;
         let mut ids = HashSet::new();
         let mut media = document.media;
         let mut tracks = Vec::new();
         for track in snapshot.tracks {
+            daw_mixer::validate_mixer_events(&track.mixer_events)?;
+            require(
+                track
+                    .mixer_events
+                    .iter()
+                    .all(|event| event.position.0 < snapshot.length_samples),
+            )?;
             require(
                 ids.insert(track.id)
                     && (0.0..=2.0).contains(&track.gain)
@@ -196,6 +219,7 @@ impl Project {
                 clips,
                 midi_clips: track.midi_clips,
                 automation_lanes: lanes,
+                mixer_events: track.mixer_events,
             });
         }
         require(media.is_empty())?;

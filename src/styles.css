@@ -1052,3 +1052,5 @@ body,
   .track-lane-head .track-name strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .detail-region .midi-editor-grid { grid-template-columns: minmax(0, 1fr) 13rem; }
 }
+
+.error-banner.timing-warning { position: relative; z-index: 5; border-color: #a97823; color: #efbf6b; }

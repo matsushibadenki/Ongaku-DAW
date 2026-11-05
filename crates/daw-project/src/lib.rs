@@ -1,16 +1,18 @@
 //! UI-independent project model and prepared graph construction.
 
 use audio_clip::{AudioClip, PcmAsset};
-use audio_types::{AudioConfig, AudioError};
+use audio_types::{AudioConfig, AudioError, PreparationCheck, PreparationToken};
 use daw_automation::{AutomationCurve, AutomationLane, AutomationParameter, AutomationPoint};
 use daw_core::{SamplePosition, transport::TimeSignature};
 use daw_midi::{MidiClip, MidiNote, MidiSynthSource};
 use daw_mixer::{AudioGraph, Track, TrackId};
+pub use daw_mixer::{MixerChange, MixerEvent};
 use daw_waveform::{WaveformPeak, WaveformPyramid};
 use serde::{Deserialize, Serialize};
 use std::{f32::consts::TAU, sync::Arc};
 
 mod clip_edit;
+mod mixer_edit;
 mod multi_clip;
 mod selection;
 mod storage;
@@ -51,6 +53,8 @@ pub struct ProjectTrackSnapshot {
     pub clips: Vec<ProjectClipSnapshot>,
     pub midi_clips: Vec<MidiClip>,
     pub automation_lanes: Vec<AutomationLane>,
+    #[serde(default)]
+    pub mixer_events: Vec<MixerEvent>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -83,6 +87,7 @@ struct ProjectTrack {
     clips: Vec<ProjectClip>,
     midi_clips: Vec<MidiClip>,
     automation_lanes: Vec<AutomationLane>,
+    mixer_events: Vec<MixerEvent>,
 }
 
 #[derive(Clone)]
@@ -144,6 +149,7 @@ impl Project {
                 }],
                 midi_clips: Vec::new(),
                 automation_lanes: Vec::new(),
+                mixer_events: Vec::new(),
             });
         }
         tracks.push(demo_midi_track(sample_rate, length_samples)?);
@@ -190,12 +196,22 @@ impl Project {
                         .collect(),
                     midi_clips: track.midi_clips.clone(),
                     automation_lanes: track.automation_lanes.clone(),
+                    mixer_events: track.mixer_events.clone(),
                 })
                 .collect(),
         }
     }
 
     pub fn build_audio_graph(&self, config: AudioConfig) -> Result<AudioGraph, AudioError> {
+        self.build_audio_graph_cancellable(config, &PreparationToken::default())
+    }
+
+    pub fn build_audio_graph_cancellable(
+        &self,
+        config: AudioConfig,
+        check: &impl PreparationCheck,
+    ) -> Result<AudioGraph, AudioError> {
+        check.checkpoint()?;
         if config.sample_rate != self.sample_rate {
             return Err(AudioError::InvalidConfig(
                 "project and graph sample rates must match",
@@ -203,12 +219,15 @@ impl Project {
         }
         let mut graph = AudioGraph::new(config)?;
         for project_track in &self.tracks {
+            check.checkpoint()?;
             let mut track = Track::new(project_track.id);
+            track.set_mixer_events(&project_track.mixer_events)?;
             track.set_gain(project_track.gain);
             track.set_pan(project_track.pan);
             track.set_mute(project_track.muted);
             track.set_solo(project_track.solo);
             for project_clip in &project_track.clips {
+                check.checkpoint()?;
                 track.add_clip(AudioClip::new(
                     project_clip.timeline_start,
                     0,
@@ -222,20 +241,33 @@ impl Project {
                     .iter()
                     .find(|lane| lane.parameter == AutomationParameter::InstrumentLevel)
                     .cloned();
-                track.set_timeline_source(Box::new(MidiSynthSource::new(
+                check.checkpoint()?;
+                track.set_timeline_source(Box::new(MidiSynthSource::new_cancellable(
                     config,
                     &project_track.midi_clips,
                     automation,
+                    check,
                 )?))?;
             }
+            check.checkpoint()?;
             graph.add_track(track)?;
         }
+        check.checkpoint()?;
         Ok(graph)
     }
 
     pub fn reconfigure_demo(&mut self, sample_rate: u32) -> Result<(), AudioError> {
         if self.sample_rate == sample_rate {
             return Ok(());
+        }
+        if self
+            .tracks
+            .iter()
+            .any(|track| !track.mixer_events.is_empty())
+        {
+            return Err(AudioError::InvalidState(
+                "sample-rate conversion of mixer events is not implemented",
+            ));
         }
         let settings: Vec<_> = self
             .tracks
@@ -523,6 +555,7 @@ fn demo_midi_track(sample_rate: u32, length_samples: u64) -> Result<ProjectTrack
             notes,
         }],
         automation_lanes: vec![automation],
+        mixer_events: Vec::new(),
     })
 }
 

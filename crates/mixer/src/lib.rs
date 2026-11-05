@@ -1,12 +1,20 @@
 //! Prepared realtime mixer graph. Topology changes are built off the audio thread.
 
+mod events;
 use audio_clip::AudioClip;
 use audio_types::{AudioConfig, AudioError, RealtimeAudioSource};
 use daw_core::{SamplePosition, transport::Transport};
+use events::{Controls, PreparedMixerEvents};
+pub use events::{MAX_MIXER_EVENTS_PER_TRACK, MixerChange, MixerEvent, validate_mixer_events};
 
 /// A prepared source whose output is derived from the engine Transport timeline.
 /// Implementations run in the audio callback and must not allocate, lock, or perform I/O.
-pub trait RealtimeTimelineSource: Send + 'static {
+pub trait RealtimeTimelineSource: Send + std::any::Any + 'static {
+    /// Copy compatible runtime state at publication; never allocate, drop resources, or block.
+    /// The prepared schedule/parameters remain owned by the new source.
+    fn inherit_state(&mut self, _previous: &dyn RealtimeTimelineSource, _position: SamplePosition) {
+    }
+
     fn sample_rate(&self) -> u32;
     fn channels(&self) -> u16;
     fn render_interleaved(
@@ -20,6 +28,63 @@ pub trait RealtimeTimelineSource: Send + 'static {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct TrackId(pub u64);
 
+/// Five-millisecond linear ramps of the effective channel coefficients.
+/// Runtime only: document/history store targets, never an old ramp cursor.
+#[derive(Clone, Copy)]
+struct MixRamp {
+    current: [f32; 3],
+    target: [f32; 3],
+    step: [f32; 3],
+    remaining: u32,
+    initialized: bool,
+}
+
+impl MixRamp {
+    const fn new() -> Self {
+        Self {
+            current: [0.0; 3],
+            target: [0.0; 3],
+            step: [0.0; 3],
+            remaining: 0,
+            initialized: false,
+        }
+    }
+
+    #[allow(clippy::float_cmp)] // Any finite target change, including sub-epsilon edits, matters.
+    fn retarget(&mut self, target: [f32; 3], samples: u32) {
+        if !self.initialized {
+            self.current = target;
+            self.target = target;
+            self.initialized = true;
+        } else if self.target != target {
+            self.target = target;
+            self.remaining = samples;
+            #[allow(clippy::cast_precision_loss)]
+            for (index, value) in target.iter().enumerate() {
+                self.step[index] = (*value - self.current[index]) / samples as f32;
+            }
+        }
+    }
+
+    fn advance(&mut self) {
+        if self.remaining == 0 {
+            return;
+        }
+        self.remaining -= 1;
+        if self.remaining == 0 {
+            self.current = self.target;
+        } else {
+            for (value, step) in self.current.iter_mut().zip(self.step) {
+                *value += step;
+            }
+        }
+    }
+}
+
+fn ramp_samples(sample_rate: u32) -> u32 {
+    (sample_rate / 200 + u32::from(sample_rate % 200 >= 100)).max(1)
+}
+
 pub struct Track {
     id: TrackId,
     clips: Vec<AudioClip>,
@@ -30,6 +95,9 @@ pub struct Track {
     realtime_source: Option<PreparedRealtimeSource>,
     timeline_source: Option<PreparedTimelineSource>,
     prepared_config: Option<AudioConfig>,
+    mix_ramp: MixRamp,
+    mixer_events: PreparedMixerEvents,
+    frame_controls: Controls,
 }
 
 struct PreparedRealtimeSource {
@@ -55,6 +123,9 @@ impl Track {
             realtime_source: None,
             timeline_source: None,
             prepared_config: None,
+            mix_ramp: MixRamp::new(),
+            mixer_events: PreparedMixerEvents::new(),
+            frame_controls: Controls::UNITY,
         }
     }
 
@@ -117,6 +188,38 @@ impl Track {
         self.timeline_source = None;
     }
 
+    /// Prepared off the audio thread; latest (position, ID) wins per parameter.
+    pub fn set_mixer_events(&mut self, events: &[MixerEvent]) -> Result<(), AudioError> {
+        self.mixer_events = PreparedMixerEvents::prepare(events)?;
+        Ok(())
+    }
+
+    fn base_controls(&self) -> Controls {
+        Controls {
+            gain: self.gain,
+            pan: self.pan,
+            mute: self.mute,
+            solo: self.solo,
+        }
+    }
+
+    fn retarget_mix(&mut self, any_solo: bool, channels: usize, ramp_length: u32) {
+        let controls = self.frame_controls;
+        let gain = if controls.mute || (any_solo && !controls.solo) {
+            0.0
+        } else {
+            controls.gain
+        };
+        self.mix_ramp.retarget(
+            [
+                gain * pan_gain(controls.pan, 0, channels),
+                gain * pan_gain(controls.pan, 1, channels),
+                gain,
+            ],
+            ramp_length,
+        );
+    }
+
     pub fn set_gain(&mut self, gain: f32) {
         self.gain = if gain.is_finite() {
             gain.clamp(0.0, 2.0)
@@ -160,12 +263,12 @@ impl Track {
         self.solo
     }
 
-    fn sample_at(&self, position: SamplePosition, channel: usize, output_channels: usize) -> f32 {
+    fn sample_at(&self, position: SamplePosition, channel: usize) -> f32 {
         let mut mixed = 0.0;
         for clip in &self.clips {
             mixed += clip.sample_at(position, channel);
         }
-        mixed * self.gain * pan_gain(self.pan, channel, output_channels)
+        mixed
     }
 
     fn prepare(&mut self, config: AudioConfig) -> Result<(), AudioError> {
@@ -275,6 +378,7 @@ pub struct AudioGraph {
     config: AudioConfig,
     tracks: Vec<Track>,
     master_gain: f32,
+    master_ramp: MixRamp,
 }
 
 impl AudioGraph {
@@ -283,6 +387,7 @@ impl AudioGraph {
             config: config.validate()?,
             tracks: Vec::new(),
             master_gain: 1.0,
+            master_ramp: MixRamp::new(),
         })
     }
 
@@ -343,6 +448,56 @@ impl AudioGraph {
             .map(|index| self.tracks.remove(index))
     }
 
+    /// Compare the final prepared schedule to the graph actually sounding, without allocation.
+    #[must_use]
+    pub fn mixer_edit_deadline(&self, previous: &Self) -> Option<SamplePosition> {
+        let mut deadline = None;
+        for track in &self.tracks {
+            let changed = previous
+                .tracks
+                .iter()
+                .find(|old| old.id == track.id)
+                .map_or_else(
+                    || track.mixer_events.first_position(),
+                    |old| track.mixer_events.deadline_vs(&old.mixer_events),
+                );
+            if let Some(position) = changed {
+                deadline = Some(
+                    deadline.map_or(position, |current: SamplePosition| current.min(position)),
+                );
+            }
+        }
+        for old in &previous.tracks {
+            if !self.tracks.iter().any(|track| track.id == old.id)
+                && let Some(position) = old.mixer_events.first_position()
+            {
+                deadline = Some(deadline.map_or(position, |current| current.min(position)));
+            }
+        }
+        deadline
+    }
+
+    /// Match stable track IDs, independent of ordering. Unknown source types keep fresh state.
+    /// Pull streams are intentionally not transplanted: they need an explicit media/generation contract.
+    pub fn inherit_state(&mut self, previous: &Self, position: SamplePosition) {
+        if self.config != previous.config {
+            return;
+        }
+        self.master_ramp = previous.master_ramp;
+        for track in &mut self.tracks {
+            if let Some(old) = previous.tracks.iter().find(|old| old.id == track.id) {
+                track.mix_ramp = old.mix_ramp;
+                if let (Some(next), Some(old)) = (&mut track.timeline_source, &old.timeline_source)
+                {
+                    next.source.inherit_state(old.source.as_ref(), position);
+                }
+            } else {
+                // A newly inserted track fades in instead of appearing at full level.
+                track.mix_ramp.initialized = true;
+            }
+        }
+    }
+
     /// Renders the prepared topology without allocation, locking, or I/O.
     pub fn process(&mut self, output: &mut [f32], transport: &Transport) {
         output.fill(0.0);
@@ -357,6 +512,16 @@ impl AudioGraph {
             .unwrap_or(usize::MAX)
             .saturating_mul(channels);
         let any_solo = self.tracks.iter().any(|track| track.solo);
+        let ramp_length = ramp_samples(self.config.sample_rate);
+        self.master_ramp
+            .retarget([self.master_gain; 3], ramp_length);
+        for track in &mut self.tracks {
+            if !track.mix_ramp.initialized {
+                // Establish the base level first, so an event at sample zero also ramps.
+                track.frame_controls = track.base_controls();
+                track.retarget_mix(any_solo, channels, ramp_length);
+            }
+        }
         let mut rendered_frames = 0;
         for block in output.chunks_mut(maximum_samples) {
             for track in &mut self.tracks {
@@ -365,8 +530,17 @@ impl AudioGraph {
             }
             for (frame_offset, frame) in block.chunks_exact_mut(channels).enumerate() {
                 let position = transport.sample_at_offset(rendered_frames + frame_offset);
-                for track in &self.tracks {
-                    if track.mute || (any_solo && !track.solo) {
+                // Evaluate every Solo target before retargeting any channel: track order cannot
+                // change same-sample exclusion. Binary searches also chase on backward seeks/loops.
+                for track in &mut self.tracks {
+                    track.frame_controls = track.mixer_events.at(position, track.base_controls());
+                }
+                let any_solo = self.tracks.iter().any(|track| track.frame_controls.solo);
+                for track in &mut self.tracks {
+                    track.retarget_mix(any_solo, channels, ramp_length);
+                    track.mix_ramp.advance();
+                    if track.mix_ramp.current.iter().all(|gain| *gain == 0.0) {
+                        // Sources above still advance; settled silence needs no PCM summing.
                         continue;
                     }
                     for (channel, sample) in frame.iter_mut().enumerate() {
@@ -378,12 +552,14 @@ impl AudioGraph {
                         } else {
                             0.0
                         };
-                        *sample += track.sample_at(position, channel, channels)
-                            + generated * track.gain * pan_gain(track.pan, channel, channels);
+                        let coefficient = track.mix_ramp.current[channel.min(2)];
+                        *sample += track.sample_at(position, channel) * coefficient
+                            + generated * coefficient;
                     }
                 }
+                self.master_ramp.advance();
                 for sample in frame {
-                    let mastered = *sample * self.master_gain;
+                    let mastered = *sample * self.master_ramp.current[0];
                     *sample = if mastered.is_nan() {
                         0.0
                     } else {
@@ -518,3 +694,166 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod ramp_tests {
+    use super::*;
+    use audio_clip::PcmAsset;
+    use daw_core::transport::TransportCommand;
+    use std::sync::Arc;
+
+    fn graph(config: AudioConfig) -> AudioGraph {
+        let mut graph = AudioGraph::new(config).unwrap();
+        for (id, value) in [(1, 0.25), (2, 0.1)] {
+            let mut track = Track::new(TrackId(id));
+            let asset = Arc::new(
+                PcmAsset::new(
+                    config.sample_rate,
+                    config.channels,
+                    vec![value; 2000 * usize::from(config.channels)],
+                )
+                .unwrap(),
+            );
+            track.add_clip(AudioClip::new(SamplePosition::ZERO, 0, 2000, asset).unwrap());
+            graph.add_track(track).unwrap();
+        }
+        graph
+    }
+
+    fn edit(graph: &mut AudioGraph, stage: usize) {
+        graph.track_mut(TrackId(1)).unwrap().set_gain(0.4);
+        if stage >= 1 {
+            graph.track_mut(TrackId(1)).unwrap().set_pan(0.8);
+        }
+        graph.track_mut(TrackId(1)).unwrap().set_mute(stage == 2);
+        graph.track_mut(TrackId(2)).unwrap().set_solo(stage == 4);
+        if stage >= 5 {
+            graph.set_master_gain(0.3);
+        }
+    }
+
+    fn render(partitions: &[usize], rebuild: bool) -> Vec<f32> {
+        let config = AudioConfig::DEFAULT;
+        let mut graph = graph(config);
+        let mut transport = Transport::new(config.sample_rate);
+        transport.apply(TransportCommand::Play);
+        graph.process(&mut [0.0; 2], &transport);
+        transport.advance(1);
+        let mut output = Vec::new();
+        for (stage, frames) in [100, 45, 55, 30, 20, 500, 500].into_iter().enumerate() {
+            if rebuild {
+                let mut next = self::graph(config);
+                edit(&mut next, stage);
+                next.inherit_state(&graph, transport.snapshot().current_sample);
+                graph = next;
+            } else {
+                edit(&mut graph, stage);
+            }
+            let mut rendered = 0;
+            let mut block = 0;
+            while rendered < frames {
+                let count = partitions[block % partitions.len()].min(frames - rendered);
+                let mut samples = vec![0.0; count * 2];
+                graph.process(&mut samples, &transport);
+                transport.advance(count);
+                output.extend(samples);
+                rendered += count;
+                block += 1;
+                if rebuild {
+                    // Unrelated publications during a ramp must not restart its deadline.
+                    let mut next = self::graph(config);
+                    edit(&mut next, stage);
+                    next.inherit_state(&graph, transport.snapshot().current_sample);
+                    graph = next;
+                }
+            }
+        }
+        output
+    }
+
+    #[test]
+    fn mixer_ramps_are_partition_invariant_and_survive_publication() {
+        let expected = render(&[1024], false);
+        for partitions in [&[1][..], &[17, 64, 127, 128, 257, 512][..]] {
+            for rebuild in [false, true] {
+                assert_eq!(render(partitions, rebuild), expected);
+            }
+        }
+        // Constant sources isolate control-induced discontinuities from waveform slope.
+        for channel in 0..2 {
+            let mut previous = 0.35_f32;
+            for frame in expected.as_chunks::<2>().0 {
+                assert!((frame[channel] - previous).abs() < 0.003);
+                previous = frame[channel];
+            }
+        }
+    }
+
+    #[test]
+    fn mute_reaches_zero_after_exactly_five_ms_for_each_sample_rate() {
+        for (rate, frames) in [(1, 1), (8000, 40), (44100, 221), (48000, 240), (96000, 480)] {
+            for channels in [1, 2, 4] {
+                let config = AudioConfig {
+                    sample_rate: rate,
+                    channels,
+                    ..AudioConfig::DEFAULT
+                };
+                let mut graph = graph(config);
+                graph.track_mut(TrackId(2)).unwrap().set_mute(true);
+                let mut transport = Transport::new(rate);
+                transport.apply(TransportCommand::Play);
+                graph.process(&mut vec![0.0; usize::from(channels)], &transport);
+                transport.advance(1);
+                graph.track_mut(TrackId(1)).unwrap().set_mute(true);
+                assert_eq!(usize::try_from(ramp_samples(rate)).unwrap(), frames);
+                let mut output = vec![0.0; (frames + 1) * usize::from(channels)];
+                graph.process(&mut output, &transport);
+                assert!(
+                    output[(frames - 1) * usize::from(channels)..]
+                        .iter()
+                        .all(|value| *value == 0.0)
+                );
+                if frames > 1 {
+                    assert!(output[(frames - 2) * usize::from(channels)] > 0.0);
+                }
+                for frame in output.chunks_exact(usize::from(channels)) {
+                    assert!(
+                        frame
+                            .iter()
+                            .all(|value| value.to_bits() == frame[0].to_bits())
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod ramp_retarget_test {
+    use super::MixRamp;
+
+    #[test]
+    fn retarget_keeps_current_level_and_unchanged_targets_keep_deadline() {
+        let mut ramp = MixRamp::new();
+        ramp.retarget([1.0; 3], 240);
+        ramp.retarget([0.0; 3], 240);
+        for _ in 0..100 {
+            ramp.advance();
+        }
+        let current = ramp.current;
+        ramp.retarget([0.0; 3], 240);
+        assert_eq!(ramp.remaining, 140);
+        assert_eq!(ramp.current.map(f32::to_bits), current.map(f32::to_bits));
+        ramp.retarget([0.75; 3], 240);
+        assert_eq!(ramp.remaining, 240);
+        assert_eq!(ramp.current.map(f32::to_bits), current.map(f32::to_bits));
+        for _ in 0..240 {
+            ramp.advance();
+        }
+        assert_eq!(ramp.current.map(f32::to_bits), [0.75; 3].map(f32::to_bits));
+        assert_eq!(ramp.remaining, 0);
+    }
+}
+
+#[cfg(test)]
+mod events_tests;

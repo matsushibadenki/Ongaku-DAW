@@ -1,6 +1,8 @@
 //! Sample-accurate MIDI clips, scheduling, and a small reusable reference instrument.
 
-use audio_types::{AudioConfig, AudioError};
+use audio_types::{
+    AudioConfig, AudioError, PreparationCheck, PreparationToken, preparation_sort_by,
+};
 use daw_automation::AutomationLane;
 use daw_core::{SamplePosition, transport::Transport};
 use daw_mixer::RealtimeTimelineSource;
@@ -50,6 +52,7 @@ pub struct MidiSchedule {
     events: Vec<MidiEvent>,
     notes: Vec<ScheduledNote>,
     event_notes: Vec<usize>,
+    identity_index: Vec<usize>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -58,7 +61,7 @@ struct NoteIdentity {
     note_id: u64,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 struct ScheduledNote {
     identity: NoteIdentity,
     start: SamplePosition,
@@ -69,12 +72,27 @@ struct ScheduledNote {
 }
 
 impl MidiSchedule {
+    /// # Panics
+    /// If an internal fresh, unshared cancellation token unexpectedly becomes canceled.
     #[must_use]
     pub fn from_clips(clips: &[MidiClip]) -> Self {
+        Self::from_clips_cancellable(clips, &PreparationToken::default())
+            .expect("fresh token cannot be canceled")
+    }
+
+    pub fn from_clips_cancellable(
+        clips: &[MidiClip],
+        check: &impl PreparationCheck,
+    ) -> Result<Self, AudioError> {
+        check.checkpoint()?;
         let note_count = clips.iter().map(|clip| clip.notes.len()).sum::<usize>();
         let mut notes = Vec::with_capacity(note_count);
         for clip in clips {
-            for note in &clip.notes {
+            check.checkpoint()?;
+            for (index, note) in clip.notes.iter().enumerate() {
+                if index % 256 == 0 {
+                    check.checkpoint()?;
+                }
                 let start = clip.timeline_start.saturating_add(note.start.0);
                 notes.push(ScheduledNote {
                     identity: NoteIdentity {
@@ -89,9 +107,16 @@ impl MidiSchedule {
                 });
             }
         }
-        notes.sort_by_key(|note| (note.start, note.identity));
+        preparation_sort_by(
+            &mut notes,
+            |a, b| (a.start, a.identity).cmp(&(b.start, b.identity)),
+            check,
+        )?;
         let mut owned_events = Vec::with_capacity(note_count.saturating_mul(2));
         for (index, note) in notes.iter().enumerate() {
+            if index % 256 == 0 {
+                check.checkpoint()?;
+            }
             owned_events.push((
                 MidiEvent {
                     sample_position: note.start,
@@ -112,19 +137,52 @@ impl MidiSchedule {
                 index,
             ));
         }
-        owned_events.sort_by(|(left, left_owner), (right, right_owner)| {
-            left.sample_position
-                .cmp(&right.sample_position)
-                .then_with(|| message_order(left.message).cmp(&message_order(right.message)))
-                .then_with(|| left_owner.cmp(right_owner))
-        });
+        preparation_sort_by(
+            &mut owned_events,
+            |(left, left_owner), (right, right_owner)| {
+                left.sample_position
+                    .cmp(&right.sample_position)
+                    .then_with(|| message_order(left.message).cmp(&message_order(right.message)))
+                    .then_with(|| left_owner.cmp(right_owner))
+            },
+            check,
+        )?;
         // Ownership indexes are prepared alongside the public MIDI events, never searched by pitch.
-        let (events, event_notes) = owned_events.into_iter().unzip();
-        Self {
+        let mut events = Vec::with_capacity(owned_events.len());
+        let mut event_notes = Vec::with_capacity(owned_events.len());
+        for (index, (event, owner)) in owned_events.into_iter().enumerate() {
+            if index % 256 == 0 {
+                check.checkpoint()?;
+            }
+            events.push(event);
+            event_notes.push(owner);
+        }
+        let mut identity_index = Vec::with_capacity(notes.len());
+        for index in 0..notes.len() {
+            if index % 256 == 0 {
+                check.checkpoint()?;
+            }
+            identity_index.push(index);
+        }
+        preparation_sort_by(
+            &mut identity_index,
+            |&a, &b| notes[a].identity.cmp(&notes[b].identity),
+            check,
+        )?;
+        check.checkpoint()?;
+        Ok(Self {
             events,
             notes,
             event_notes,
-        }
+            identity_index,
+        })
+    }
+
+    fn note(&self, identity: NoteIdentity) -> Option<&ScheduledNote> {
+        self.identity_index
+            .binary_search_by_key(&identity, |&index| self.notes[index].identity)
+            .ok()
+            .map(|index| &self.notes[self.identity_index[index]])
     }
 
     #[must_use]
@@ -158,6 +216,7 @@ pub struct MidiSynthSource {
     schedule: MidiSchedule,
     level_automation: Option<AutomationLane>,
     voices: [Voice; VOICE_COUNT],
+    phase_steps: [f32; 128],
     last_position: Option<SamplePosition>,
 }
 
@@ -167,10 +226,31 @@ impl MidiSynthSource {
         clips: &[MidiClip],
         level_automation: Option<AutomationLane>,
     ) -> Result<Self, AudioError> {
-        validate_clips(clips)?;
+        Self::new_cancellable(
+            config,
+            clips,
+            level_automation,
+            &PreparationToken::default(),
+        )
+    }
+
+    pub fn new_cancellable(
+        config: AudioConfig,
+        clips: &[MidiClip],
+        level_automation: Option<AutomationLane>,
+        check: &impl PreparationCheck,
+    ) -> Result<Self, AudioError> {
+        check.checkpoint()?;
+        validate_clips(clips, check)?;
+        let config = config.validate()?;
+        #[allow(clippy::cast_precision_loss)]
+        let phase_steps = std::array::from_fn(|key| {
+            440.0 * 2.0_f32.powf((key as f32 - 69.0) / 12.0) / config.sample_rate as f32
+        });
         Ok(Self {
-            config: config.validate()?,
-            schedule: MidiSchedule::from_clips(clips),
+            config,
+            phase_steps,
+            schedule: MidiSchedule::from_clips_cancellable(clips, check)?,
             level_automation,
             voices: [Voice::default(); VOICE_COUNT],
             last_position: None,
@@ -224,21 +304,75 @@ impl MidiSynthSource {
             .as_ref()
             .map_or(1.0, |lane| lane.value_at(position));
         let mut sample = 0.0;
-        #[allow(clippy::cast_precision_loss)]
-        let sample_rate = self.config.sample_rate as f32;
         for voice in &mut self.voices {
             if !voice.active {
                 continue;
             }
-            let frequency = 440.0 * 2.0_f32.powf((f32::from(voice.key) - 69.0) / 12.0);
             sample += (voice.phase * TAU).sin() * voice.velocity * 0.12;
-            voice.phase = (voice.phase + frequency / sample_rate).fract();
+            voice.phase = (voice.phase + self.phase_steps[usize::from(voice.key)]).fract();
         }
         (sample * level).clamp(-1.0, 1.0)
     }
 }
 
 impl RealtimeTimelineSource for MidiSynthSource {
+    fn inherit_state(&mut self, previous: &dyn RealtimeTimelineSource, position: SamplePosition) {
+        let Some(old) = (previous as &dyn std::any::Any).downcast_ref::<Self>() else {
+            return;
+        };
+        if self.config != old.config
+            || old
+                .last_position
+                .is_none_or(|last| last.0.checked_add(1) != Some(position.0))
+        {
+            return;
+        }
+        // Copy only fixed-size runtime data; schedules and automation stay newly prepared.
+        self.last_position = old.last_position;
+        for (index, voice) in old.voices.iter().enumerate() {
+            if !voice.active {
+                continue;
+            }
+            let Some(note) = voice
+                .identity
+                .and_then(|identity| self.schedule.note(identity))
+            else {
+                continue;
+            };
+            let old_note = voice
+                .identity
+                .and_then(|identity| old.schedule.note(identity));
+            if note.start < position
+                && position < note.end
+                && old_note.is_some_and(|old_note| {
+                    old_note.start == note.start
+                        && old_note.key == note.key
+                        && old_note.channel == note.channel
+                })
+            {
+                // Keep slot order as well as phase: floating-point summation and future
+                // free-slot selection must match uninterrupted playback.
+                self.voices[index] = *voice;
+                self.voices[index].velocity = note.velocity;
+                self.voices[index].active = note.velocity > 0.0;
+            }
+        }
+        // New/changed notes already spanning publication chase once. Unchanged stolen voices
+        // stay stolen; boundary Note Ons are left to normal event processing.
+        for note in &self.schedule.notes {
+            if note.start < position
+                && position < note.end
+                && !self
+                    .voices
+                    .iter()
+                    .any(|voice| voice.active && voice.identity == Some(note.identity))
+                && old.schedule.note(note.identity) != Some(note)
+            {
+                activate_voice(&mut self.voices, note);
+            }
+        }
+    }
+
     fn sample_rate(&self) -> u32 {
         self.config.sample_rate
     }
@@ -267,6 +401,10 @@ impl RealtimeTimelineSource for MidiSynthSource {
 }
 
 fn activate_voice(voices: &mut [Voice; VOICE_COUNT], note: &ScheduledNote) {
+    // A zero-velocity piano-roll note is silent and must not steal an audible voice.
+    if note.velocity <= 0.0 {
+        return;
+    }
     let index = voices
         .iter()
         .position(|voice| !voice.active)
@@ -287,9 +425,10 @@ fn activate_voice(voices: &mut [Voice; VOICE_COUNT], note: &ScheduledNote) {
     };
 }
 
-fn validate_clips(clips: &[MidiClip]) -> Result<(), AudioError> {
+fn validate_clips(clips: &[MidiClip], check: &impl PreparationCheck) -> Result<(), AudioError> {
     let mut clip_ids = HashSet::new();
     for clip in clips {
+        check.checkpoint()?;
         if !clip_ids.insert(clip.id)
             || clip.duration_samples == 0
             || clip
@@ -303,7 +442,10 @@ fn validate_clips(clips: &[MidiClip]) -> Result<(), AudioError> {
             ));
         }
         let mut note_ids = HashSet::new();
-        for note in &clip.notes {
+        for (index, note) in clip.notes.iter().enumerate() {
+            if index % 256 == 0 {
+                check.checkpoint()?;
+            }
             if !note_ids.insert(note.id)
                 || note.key > 127
                 || note.channel > 15
@@ -535,5 +677,200 @@ mod p0_regressions {
         let mut invalid = clips;
         invalid[0].notes[0].duration_samples = 33;
         assert!(MidiSynthSource::new(AudioConfig::DEFAULT, &invalid, None).is_err());
+    }
+    #[test]
+    fn publication_reconciles_changed_notes_without_reviving_stolen_voices() {
+        let config = AudioConfig::DEFAULT;
+        let clips = overlap_clips();
+        let mut old = MidiSynthSource::new(config, &clips, None).unwrap();
+        let mut transport = Transport::new(config.sample_rate);
+        transport.apply(TransportCommand::Play);
+        old.render_interleaved(&mut [0.0; 12], &transport, 0);
+        transport.advance(6);
+        let phase = old.voices[0].phase;
+        let mut edited = clips.clone();
+        edited[0].notes[0].duration_samples = 24;
+        edited[0].notes[0].velocity = 0.25;
+        edited[1].notes[0].key = 72;
+        let mut next = MidiSynthSource::new(config, &edited, None).unwrap();
+        next.inherit_state(&old, SamplePosition(6));
+        assert_eq!(next.voices[0].phase.to_bits(), phase.to_bits());
+        assert_eq!(next.voices[0].velocity.to_bits(), 0.25_f32.to_bits());
+        assert!(
+            next.voices
+                .iter()
+                .any(|voice| voice.active && voice.key == 72 && voice.phase == 0.0)
+        );
+        assert!(!next.voices.iter().any(|voice| voice.active
+            && voice.key == 60
+            && voice.identity
+                == Some(NoteIdentity {
+                    clip_id: 2,
+                    note_id: 1
+                })));
+        // Deleting an active note releases it; Undo can chase it but cannot revive a stale phase.
+        edited[0].notes.clear();
+        let mut deleted = MidiSynthSource::new(config, &edited, None).unwrap();
+        deleted.inherit_state(&old, SamplePosition(6));
+        assert!(!deleted.voices.iter().any(|voice| voice.active
+            && voice.identity
+                == Some(NoteIdentity {
+                    clip_id: 1,
+                    note_id: 1
+                })));
+        let mut deleted_clips = clips.clone();
+        deleted_clips[0].notes.clear();
+        let mut deleted = MidiSynthSource::new(config, &deleted_clips, None).unwrap();
+        deleted.inherit_state(&old, SamplePosition(6));
+        deleted.render_interleaved(&mut [0.0; 2], &transport, 0);
+        let surviving = deleted.voices.iter().find(|voice| voice.active).unwrap();
+        let mut restored = MidiSynthSource::new(config, &clips, None).unwrap();
+        restored.inherit_state(&deleted, SamplePosition(7));
+        let restored_survivor = restored
+            .voices
+            .iter()
+            .find(|voice| voice.active && voice.identity == surviving.identity)
+            .unwrap();
+        assert_eq!(restored_survivor.phase.to_bits(), surviving.phase.to_bits());
+        assert!(restored.voices.iter().any(|voice| voice.active
+            && voice.identity
+                == Some(NoteIdentity {
+                    clip_id: 1,
+                    note_id: 1
+                })
+            && voice.phase == 0.0));
+        transport.advance(1);
+        next.render_interleaved(&mut [0.0; 40], &transport, 0);
+        assert!(next.voices.iter().all(|voice| !voice.active));
+        // Non-contiguous publication must defer to the existing seek/loop chase policy.
+        let mut seek = MidiSynthSource::new(config, &clips, None).unwrap();
+        seek.inherit_state(&old, SamplePosition(10));
+        assert!(seek.last_position.is_none());
+    }
+
+    #[test]
+    fn identical_publication_preserves_holes_and_stolen_voice_state() {
+        let config = AudioConfig::DEFAULT;
+        let mut clips = overlap_clips();
+        clips[0].notes = (0_u64..17)
+            .map(|id| MidiNote {
+                id,
+                start: SamplePosition(id),
+                duration_samples: if id == 1 { 20 } else { 100 },
+                key: 48 + u8::try_from(id).unwrap(),
+                channel: 0,
+                velocity: 0.3,
+            })
+            .collect();
+        clips[0].duration_samples = 200;
+        clips.truncate(1);
+        let mut old = MidiSynthSource::new(config, &clips, None).unwrap();
+        let mut transport = Transport::new(config.sample_rate);
+        transport.apply(TransportCommand::Play);
+        old.render_interleaved(&mut [0.0; 50], &transport, 0);
+        transport.advance(25);
+        let mut next = MidiSynthSource::new(config, &clips, None).unwrap();
+        next.inherit_state(&old, SamplePosition(25));
+        assert_eq!(next.voices.iter().filter(|voice| voice.active).count(), 15);
+        for (next, old) in next.voices.iter().zip(&old.voices) {
+            if old.active {
+                assert_eq!(next.identity, old.identity);
+                assert_eq!(next.phase.to_bits(), old.phase.to_bits());
+            }
+        }
+        let mut actual = [0.0; 150];
+        let mut expected = actual;
+        next.render_interleaved(&mut actual, &transport, 0);
+        old.render_interleaved(&mut expected, &transport, 0);
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn silent_notes_do_not_steal_audible_voices() {
+        let notes = (0_u64..17)
+            .map(|id| MidiNote {
+                id,
+                start: SamplePosition(u64::from(id == 16)),
+                duration_samples: 16,
+                key: 60,
+                channel: 0,
+                velocity: if id == 16 { 0.0 } else { 0.3 },
+            })
+            .collect();
+        let clip = MidiClip {
+            id: 1,
+            timeline_start: SamplePosition(0),
+            duration_samples: 32,
+            notes,
+        };
+        let mut source = MidiSynthSource::new(AudioConfig::DEFAULT, &[clip], None).unwrap();
+        let mut transport = Transport::new(48000);
+        transport.apply(TransportCommand::Play);
+        source.render_interleaved(&mut [0.0; 4], &transport, 0);
+        assert_eq!(
+            source.voices.iter().filter(|voice| voice.active).count(),
+            16
+        );
+        assert!(source.voices.iter().any(|voice| voice.active
+            && voice.identity
+                == Some(NoteIdentity {
+                    clip_id: 1,
+                    note_id: 0
+                })));
+        assert!(source.voices.iter().all(|voice| voice.identity
+            != Some(NoteIdentity {
+                clip_id: 1,
+                note_id: 16
+            })));
+    }
+}
+
+#[cfg(test)]
+mod cancellation_tests {
+    use super::*;
+    use std::cell::Cell;
+    struct Budget(Cell<usize>);
+    impl PreparationCheck for Budget {
+        fn checkpoint(&self) -> Result<(), AudioError> {
+            let remaining = self.0.get();
+            if remaining == 0 {
+                Err(AudioError::PreparationCanceled)
+            } else {
+                self.0.set(remaining - 1);
+                Ok(())
+            }
+        }
+    }
+    #[test]
+    fn dense_schedule_construction_can_stop_during_collection_and_sorting() {
+        let clips = [MidiClip {
+            id: 1,
+            timeline_start: SamplePosition::ZERO,
+            duration_samples: 10001,
+            notes: (0..10000)
+                .rev()
+                .map(|id| MidiNote {
+                    id,
+                    start: SamplePosition(id),
+                    duration_samples: 1,
+                    key: 60,
+                    velocity: 0.5,
+                    channel: 0,
+                })
+                .collect(),
+        }];
+        for budget in [0, 4, 50, 100, 500] {
+            assert!(matches!(
+                MidiSchedule::from_clips_cancellable(&clips, &Budget(Cell::new(budget))),
+                Err(AudioError::PreparationCanceled)
+            ));
+        }
+        let schedule = MidiSchedule::from_clips(&clips);
+        assert_eq!(schedule.events().len(), 20000);
+        assert_eq!(schedule.events()[0].sample_position, SamplePosition::ZERO);
+        assert_eq!(
+            schedule.events().last().unwrap().sample_position,
+            SamplePosition(10000)
+        );
     }
 }

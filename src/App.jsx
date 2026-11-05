@@ -132,8 +132,10 @@ export function App() {
         onToggleEditor={() => setEditorOpen((value) => !value)} />
       <div className={`studio-body${browserOpen ? " browser-open" : ""}`}>
       <main className={`workspace${inspectorOpen ? " has-inspector" : ""}${editorOpen ? " has-editor" : ""}`}>
-        {session.error && <div className="error-banner" role="alert"><strong>{t.commandFailed}</strong><span>{session.error}</span>
-          <button type="button" onClick={() => session.setError("")}>{t.dismiss}</button></div>}
+        {(session.error || session.timingWarning) && <div className={`error-banner${session.error ? "" : " timing-warning"}`} role={session.error ? "alert" : "status"}>
+          <strong>{session.error ? t.commandFailed : t.editTiming}</strong>
+          <span>{session.error || (session.timingWarning === "late" ? t.lateEditNotice : t.adoptionHistoryNotice)}</span>
+          <button type="button" onClick={() => session.error ? session.setError("") : session.dismissTimingWarning()}>{t.dismiss}</button></div>}
         {inspectorOpen && <TrackInspector t={t} track={selectedTrack} session={session} />}
         <EditorMap t={t} session={session} onEditClips={editClips} selectedClipKeys={effectiveClipKeys} onSelectClip={selectClip} selectedTrackId={selectedTrackId} onSelectTrack={selectTrack} />
         {editorOpen && <div className="detail-region">
@@ -156,7 +158,7 @@ export function App() {
           busy: session.busy, onTogglePlayback: session.togglePlayback, onStop: session.stopPlayback,
           onSeek: session.seek, onToggleLoop: session.toggleLoop }} />
       <StatusBar t={t} config={session.config} metrics={session.metrics} running={session.running}
-        previewMode={session.previewMode} />
+        previewMode={session.previewMode} publicationStatus={session.publicationStatus} />
     </div>
   );
 }
