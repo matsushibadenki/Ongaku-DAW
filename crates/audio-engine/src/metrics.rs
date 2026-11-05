@@ -6,11 +6,13 @@ use std::{
     time::Duration,
 };
 
-const HISTOGRAM_BUCKETS: usize = 32;
+const HISTOGRAM_BUCKETS: usize = 64;
 
 /// Fixed-memory realtime metrics. Buckets are powers of two in microseconds.
 pub struct RealtimeMetrics {
-    deadline_ns: u64,
+    default_deadline_ns: u64,
+    deadline_ns: AtomicU64,
+    total_budget_ns: AtomicU64,
     callback_count: AtomicU64,
     total_duration_ns: AtomicU64,
     maximum_duration_ns: AtomicU64,
@@ -29,7 +31,9 @@ impl RealtimeMetrics {
     #[must_use]
     pub fn new(deadline_ns: u64) -> Self {
         Self {
-            deadline_ns,
+            default_deadline_ns: deadline_ns,
+            deadline_ns: AtomicU64::new(deadline_ns),
+            total_budget_ns: AtomicU64::new(0),
             callback_count: AtomicU64::new(0),
             total_duration_ns: AtomicU64::new(0),
             maximum_duration_ns: AtomicU64::new(0),
@@ -39,17 +43,45 @@ impl RealtimeMetrics {
         }
     }
 
+    /// Records against the configured period for callers with a fixed buffer size.
     pub fn record(&self, duration: Duration) {
+        self.record_period(duration, self.default_deadline_ns);
+    }
+
+    /// Empty/invalid callbacks have no audio period and are excluded from timing statistics.
+    pub fn record_callback(&self, duration: Duration, frames: usize, sample_rate: u32) {
+        if frames == 0 || sample_rate == 0 {
+            return;
+        }
+        let deadline = u128::try_from(frames)
+            .unwrap_or(u128::MAX)
+            .saturating_mul(1_000_000_000)
+            / u128::from(sample_rate);
+        self.record_period(duration, u64::try_from(deadline).unwrap_or(u64::MAX));
+    }
+
+    fn record_period(&self, duration: Duration, deadline_ns: u64) {
+        if deadline_ns == 0 {
+            return;
+        }
         let nanos = u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX);
-        self.callback_count.fetch_add(1, Ordering::Relaxed);
         self.total_duration_ns.fetch_add(nanos, Ordering::Relaxed);
+        self.total_budget_ns
+            .fetch_add(deadline_ns, Ordering::Relaxed);
+        self.deadline_ns.store(deadline_ns, Ordering::Relaxed);
         self.maximum_duration_ns.fetch_max(nanos, Ordering::Relaxed);
-        if nanos > self.deadline_ns {
+        if nanos > deadline_ns {
             self.xrun_count.fetch_add(1, Ordering::Relaxed);
         }
-        let micros = nanos.div_ceil(1_000).max(1);
-        let bucket = (u64::BITS - micros.leading_zeros()) as usize;
-        self.histogram[bucket.min(HISTOGRAM_BUCKETS - 1)].fetch_add(1, Ordering::Relaxed);
+        let micros = nanos.div_ceil(1000).max(1);
+        // Upper power-of-two bound: exact powers must not jump into the next bucket.
+        let bucket = if micros <= 1 {
+            0
+        } else {
+            (u64::BITS - (micros - 1).leading_zeros()) as usize
+        };
+        self.histogram[bucket].fetch_add(1, Ordering::Relaxed);
+        self.callback_count.fetch_add(1, Ordering::Release);
     }
 
     pub fn record_backend_error(&self) {
@@ -58,10 +90,11 @@ impl RealtimeMetrics {
 
     #[allow(clippy::cast_precision_loss)]
     pub fn snapshot(&self) -> RealtimeMetricsSnapshot {
-        let count = self.callback_count.load(Ordering::Relaxed);
+        let count = self.callback_count.load(Ordering::Acquire);
         let total = self.total_duration_ns.load(Ordering::Relaxed);
         let maximum = self.maximum_duration_ns.load(Ordering::Relaxed);
-        let deadline_us = self.deadline_ns as f64 / 1_000.0;
+        let deadline_us = self.deadline_ns.load(Ordering::Relaxed) as f64 / 1_000.0;
+        let total_budget = self.total_budget_ns.load(Ordering::Relaxed);
         let average_us = if count == 0 {
             0.0
         } else {
@@ -75,10 +108,10 @@ impl RealtimeMetrics {
             maximum_callback_us: maximum as f64 / 1_000.0,
             p99_9_callback_us: self.percentile_us(count, 0.999),
             deadline_us,
-            cpu_load: if deadline_us == 0.0 {
+            cpu_load: if total_budget == 0 {
                 0.0
             } else {
-                average_us / deadline_us
+                total as f64 / total_budget as f64
             },
         }
     }
@@ -100,7 +133,9 @@ impl RealtimeMetrics {
                 return (1_u64 << index) as f64;
             }
         }
-        (1_u64 << (HISTOGRAM_BUCKETS - 1)) as f64
+        self.maximum_duration_ns
+            .load(Ordering::Relaxed)
+            .div_ceil(1000) as f64
     }
 }
 
@@ -118,5 +153,28 @@ mod tests {
         assert_eq!(snapshot.callback_count, 2);
         assert_eq!(snapshot.xrun_count, 1);
         assert!((snapshot.maximum_callback_us - 2_000.0).abs() < f64::EPSILON);
+    }
+    #[test]
+    fn variable_period_deadlines_and_weighted_load_are_accounted_separately() {
+        let metrics = RealtimeMetrics::new(2_666_666);
+        metrics.record_callback(Duration::from_millis(2), 64, 48000);
+        metrics.record_callback(Duration::from_millis(2), 256, 48000);
+        metrics.record_callback(Duration::from_secs(10), 0, 48000);
+        let snapshot = metrics.snapshot();
+        assert_eq!(snapshot.callback_count, 2);
+        assert_eq!(snapshot.xrun_count, 1);
+        assert!((snapshot.deadline_us - 5333.333).abs() < 0.01);
+        assert!((snapshot.cpu_load - 0.6).abs() < 0.000_001);
+        assert!((snapshot.p99_9_callback_us - 2048.0).abs() < f64::EPSILON);
+    }
+    #[test]
+    fn histogram_upper_bounds_handle_exact_powers_and_long_callbacks() {
+        let metrics = RealtimeMetrics::new(100_000);
+        metrics.record(Duration::from_micros(8));
+        assert!((metrics.snapshot().p99_9_callback_us - 8.0).abs() < f64::EPSILON);
+        metrics.record(Duration::from_micros(9));
+        assert!((metrics.snapshot().p99_9_callback_us - 16.0).abs() < f64::EPSILON);
+        metrics.record(Duration::from_secs(10000));
+        assert!(metrics.snapshot().p99_9_callback_us >= 10_000_000_000.0);
     }
 }

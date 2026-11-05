@@ -135,7 +135,16 @@ impl Transport {
     #[must_use]
     pub fn sample_at_offset(&self, frame_offset: usize) -> SamplePosition {
         let offset = u64::try_from(frame_offset).unwrap_or(u64::MAX);
-        self.wrap(self.snapshot.current_sample.saturating_add(offset))
+        let current = self.snapshot.current_sample.0;
+        if let Some(range) = self.snapshot.loop_range {
+            // Subtract the distance to the loop end before addition, so a large offset
+            // wraps correctly even when current + offset would exceed u64::MAX.
+            let until_end = range.end.0 - current;
+            if offset >= until_end {
+                return SamplePosition(range.start.0 + (offset - until_end) % range.length());
+            }
+        }
+        self.snapshot.current_sample.saturating_add(offset)
     }
 
     pub fn advance(&mut self, frames: usize) {
@@ -210,5 +219,69 @@ mod tests {
         transport.apply(TransportCommand::Stop);
         assert!(!transport.snapshot().playing);
         assert!(!transport.snapshot().recording);
+    }
+}
+
+#[cfg(test)]
+mod p0_regressions {
+    use super::*;
+    #[test]
+    fn looping_offsets_do_not_saturate_before_modulo() {
+        let mut transport = Transport::new(48000);
+        let start = u64::MAX - 20;
+        let end = u64::MAX - 3;
+        transport.apply(TransportCommand::SetLoop(SampleRange::new(
+            SamplePosition(start),
+            SamplePosition(end),
+        )));
+        transport.apply(TransportCommand::Seek(SamplePosition(end - 2)));
+        let expected = start + 98 % 17;
+        assert_eq!(transport.sample_at_offset(100), SamplePosition(expected));
+    }
+    #[test]
+    fn sample_positions_match_an_independent_u128_loop_oracle_for_every_partition() {
+        for start in [5_u64, u64::MAX - 2000] {
+            for length in [1_u64, 2, 17, 130] {
+                let end = start + length;
+                for initial in [start - 3, start, end - 1] {
+                    for partitions in [&[1][..], &[17, 64, 127, 128, 257, 512, 1024][..]] {
+                        let expected = |elapsed: usize| {
+                            let total = u128::from(initial) + elapsed as u128;
+                            if total < u128::from(end) {
+                                u64::try_from(total).unwrap()
+                            } else {
+                                start
+                                    + u64::try_from(
+                                        (total - u128::from(start)) % u128::from(length),
+                                    )
+                                    .unwrap()
+                            }
+                        };
+                        let mut transport = Transport::new(48000);
+                        transport.apply(TransportCommand::SetLoop(SampleRange::new(
+                            SamplePosition(start),
+                            SamplePosition(end),
+                        )));
+                        transport.apply(TransportCommand::Seek(SamplePosition(initial)));
+                        transport.apply(TransportCommand::Play);
+                        let mut frame = 0;
+                        let mut block = 0;
+                        while frame < 4096 {
+                            let count = partitions[block % partitions.len()].min(4096 - frame);
+                            for offset in 0..count {
+                                assert_eq!(
+                                    transport.sample_at_offset(offset).0,
+                                    expected(frame + offset)
+                                );
+                            }
+                            transport.advance(count);
+                            frame += count;
+                            block += 1;
+                            assert_eq!(transport.snapshot().current_sample.0, expected(frame));
+                        }
+                    }
+                }
+            }
+        }
     }
 }

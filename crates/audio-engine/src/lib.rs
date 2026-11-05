@@ -19,6 +19,11 @@ use std::sync::{
 const GRAPH_QUEUE_CAPACITY: usize = 4;
 const TRANSPORT_QUEUE_CAPACITY: usize = 64;
 
+struct TransportRequest {
+    command: TransportCommand,
+    stop_generation: u64,
+}
+
 pub enum EngineGraph {
     TestTone(PhaseOneGraph),
     Timeline(AudioGraph),
@@ -64,6 +69,8 @@ struct SharedTransport {
     loop_enabled: AtomicBool,
     loop_start: AtomicU64,
     loop_end: AtomicU64,
+    stop_requested: AtomicU64,
+    stop_applied: AtomicU64,
 }
 
 impl SharedTransport {
@@ -81,6 +88,8 @@ impl SharedTransport {
             loop_enabled: AtomicBool::new(false),
             loop_start: AtomicU64::new(0),
             loop_end: AtomicU64::new(0),
+            stop_requested: AtomicU64::new(0),
+            stop_applied: AtomicU64::new(0),
         }
     }
 
@@ -148,7 +157,7 @@ pub struct EngineControl {
     metrics: Arc<RealtimeMetrics>,
     graph_updates: Arc<Mutex<Producer<EngineGraph>>>,
     retired_graphs: Arc<Mutex<Consumer<EngineGraph>>>,
-    transport_commands: Arc<Mutex<Producer<TransportCommand>>>,
+    transport_commands: Arc<Mutex<Producer<TransportRequest>>>,
     transport: Arc<SharedTransport>,
 }
 
@@ -178,11 +187,30 @@ impl EngineControl {
             .map_err(|_| AudioError::Backend("graph update queue is full".into()))
     }
 
+    /// Stop is an out-of-band barrier, independent of queue capacity and producer locks.
+    /// Play/record requests during an unacknowledged stop are rejected for explicit retry.
     pub fn send_transport(&self, command: TransportCommand) -> Result<(), AudioError> {
+        if command == TransportCommand::Stop {
+            self.transport.stop_requested.fetch_add(1, Ordering::AcqRel);
+            return Ok(());
+        }
+        let stop_generation = self.transport.stop_requested.load(Ordering::Acquire);
+        if matches!(
+            command,
+            TransportCommand::Play | TransportCommand::SetRecording(true)
+        ) && stop_generation != self.transport.stop_applied.load(Ordering::Acquire)
+        {
+            return Err(AudioError::InvalidState(
+                "stop is pending; retry playback after acknowledgement",
+            ));
+        }
         self.transport_commands
             .lock()
             .map_err(|_| AudioError::InvalidState("transport command lock was poisoned"))?
-            .push(command)
+            .push(TransportRequest {
+                command,
+                stop_generation,
+            })
             .map_err(|_| AudioError::Backend("transport command queue is full".into()))
     }
 
@@ -214,8 +242,9 @@ pub struct EngineProcessor {
     graph_updates: Consumer<EngineGraph>,
     retired_graphs: Producer<EngineGraph>,
     retired_fallback: Option<EngineGraph>,
-    transport_commands: Consumer<TransportCommand>,
+    transport_commands: Consumer<TransportRequest>,
     transport: Transport,
+    applied_stop_generation: u64,
     shared_transport: Arc<SharedTransport>,
 }
 
@@ -244,6 +273,7 @@ impl EngineProcessor {
             retired_fallback: None,
             transport_commands: transport_consumer,
             transport: Transport::new(config.sample_rate),
+            applied_stop_generation: 0,
             shared_transport: Arc::clone(&shared_transport),
         };
         let control = EngineControl {
@@ -266,12 +296,22 @@ impl EngineProcessor {
     pub fn process_block(&mut self, output: &mut [f32]) {
         let started = std::time::Instant::now();
         self.apply_graph_update();
+        self.apply_stop_barrier();
         for _ in 0..TRANSPORT_QUEUE_CAPACITY {
-            let Ok(command) = self.transport_commands.pop() else {
+            let Ok(request) = self.transport_commands.pop() else {
                 break;
             };
-            self.transport.apply(command);
+            let starts_playback = matches!(
+                request.command,
+                TransportCommand::Play | TransportCommand::SetRecording(true)
+            );
+            if !starts_playback || request.stop_generation == self.applied_stop_generation {
+                // Tempo, meter, loop and seek updates are not discarded by a stop.
+                self.transport.apply(request.command);
+            }
         }
+        // A stop arriving during command draining still wins before rendering this block.
+        self.apply_stop_barrier();
         let requested_gain = self.gain_bits.load(Ordering::Acquire);
         if requested_gain != self.applied_gain_bits {
             self.graph
@@ -282,7 +322,19 @@ impl EngineProcessor {
         let frames = output.len() / usize::from(self.config.channels);
         self.transport.advance(frames);
         self.shared_transport.publish(self.transport.snapshot());
-        self.metrics.record(started.elapsed());
+        self.shared_transport
+            .stop_applied
+            .store(self.applied_stop_generation, Ordering::Release);
+        self.metrics
+            .record_callback(started.elapsed(), frames, self.config.sample_rate);
+    }
+
+    fn apply_stop_barrier(&mut self) {
+        let generation = self.shared_transport.stop_requested.load(Ordering::Acquire);
+        if generation != self.applied_stop_generation {
+            self.transport.apply(TransportCommand::Stop);
+            self.applied_stop_generation = generation;
+        }
     }
 
     fn apply_graph_update(&mut self) {
@@ -568,5 +620,143 @@ mod tests {
         IN_REALTIME_TEST.with(|flag| flag.set(false));
         assert_eq!(REALTIME_MEMORY_EVENTS.load(Ordering::Relaxed), before);
         assert!(output.iter().any(|sample| sample.abs() > f32::EPSILON));
+    }
+    #[test]
+    fn overlap_loop_seek_and_saturated_stop_remain_allocation_free() {
+        let config = AudioConfig::DEFAULT;
+        let notes = (0_u64..20)
+            .map(|id| MidiNote {
+                id,
+                start: SamplePosition(if id < 16 { 0 } else { 4 }),
+                duration_samples: if id == 0 { 8 } else { 20 + id },
+                key: 60,
+                channel: 0,
+                velocity: 0.4,
+            })
+            .collect();
+        let clip = MidiClip {
+            id: 1,
+            timeline_start: SamplePosition(0),
+            duration_samples: 4096,
+            notes,
+        };
+        let source = MidiSynthSource::new(config, &[clip], None).unwrap();
+        let mut track = Track::new(TrackId(1));
+        track.set_timeline_source(Box::new(source)).unwrap();
+        let mut graph = AudioGraph::new(config).unwrap();
+        graph.add_track(track).unwrap();
+        let (mut engine, control) = EngineProcessor::prepare(config).unwrap();
+        control.submit_graph(EngineGraph::timeline(graph)).unwrap();
+        control
+            .send_transport(TransportCommand::SetLoop(daw_core::SampleRange::new(
+                SamplePosition(4),
+                SamplePosition(31),
+            )))
+            .unwrap();
+        control
+            .send_transport(TransportCommand::Seek(SamplePosition(7)))
+            .unwrap();
+        control.send_transport(TransportCommand::Play).unwrap();
+        let mut output = [0.0; 256];
+        let before = REALTIME_MEMORY_EVENTS.load(Ordering::Relaxed);
+        IN_REALTIME_TEST.with(|flag| flag.set(true));
+        engine.process_block(&mut output);
+        IN_REALTIME_TEST.with(|flag| flag.set(false));
+        assert_eq!(REALTIME_MEMORY_EVENTS.load(Ordering::Relaxed), before);
+        assert!(output.iter().any(|sample| sample.abs() > f32::EPSILON));
+        for _ in 0..super::TRANSPORT_QUEUE_CAPACITY {
+            control.send_transport(TransportCommand::Play).unwrap();
+        }
+        control.send_transport(TransportCommand::Stop).unwrap();
+        let before = REALTIME_MEMORY_EVENTS.load(Ordering::Relaxed);
+        IN_REALTIME_TEST.with(|flag| flag.set(true));
+        engine.process_block(&mut output);
+        IN_REALTIME_TEST.with(|flag| flag.set(false));
+        assert_eq!(REALTIME_MEMORY_EVENTS.load(Ordering::Relaxed), before);
+        assert!(output.iter().all(|sample| sample.abs() < f32::EPSILON));
+        assert!(!control.transport().playing);
+        control.send_transport(TransportCommand::Play).unwrap();
+        engine.process_block(&mut output);
+        assert!(control.transport().playing);
+        assert!(output.iter().any(|sample| sample.abs() > f32::EPSILON));
+    }
+}
+
+#[cfg(test)]
+mod p0_regressions {
+    use super::*;
+    #[test]
+    fn stop_is_accepted_when_the_transport_queue_is_full() {
+        let (mut processor, control) = EngineProcessor::prepare(AudioConfig::DEFAULT).unwrap();
+        for _ in 0..TRANSPORT_QUEUE_CAPACITY {
+            control.send_transport(TransportCommand::Play).unwrap();
+        }
+        assert!(
+            control.send_transport(TransportCommand::Stop).is_ok(),
+            "stop must not compete for ordinary queue capacity"
+        );
+        processor.process_block(&mut [0.0; 256]);
+        assert!(
+            !control.transport().playing,
+            "queued play requests must not override the stop barrier"
+        );
+    }
+    #[test]
+    fn metrics_use_the_actual_callback_frame_count() {
+        let (mut processor, control) = EngineProcessor::prepare(AudioConfig::DEFAULT).unwrap();
+        processor.process_block(&mut [0.0; 128]); // 64 stereo frames, requested size is 128 frames.
+        assert!((control.metrics().deadline_us - 1333.333).abs() < 0.01);
+    }
+    #[test]
+    fn stop_barrier_rejects_early_restart_but_preserves_clock_settings() {
+        let (mut engine, control) = EngineProcessor::prepare(AudioConfig::DEFAULT).unwrap();
+        control
+            .send_transport(TransportCommand::SetTempo(135.0))
+            .unwrap();
+        control
+            .send_transport(TransportCommand::SetTimeSignature(
+                daw_core::transport::TimeSignature {
+                    numerator: 7,
+                    denominator: 8,
+                },
+            ))
+            .unwrap();
+        control.send_transport(TransportCommand::Play).unwrap();
+        control
+            .send_transport(TransportCommand::SetRecording(true))
+            .unwrap();
+        control.send_transport(TransportCommand::Stop).unwrap();
+        assert!(control.send_transport(TransportCommand::Play).is_err());
+        assert!(
+            control
+                .send_transport(TransportCommand::SetRecording(true))
+                .is_err()
+        );
+        control
+            .send_transport(TransportCommand::Seek(daw_core::SamplePosition(123)))
+            .unwrap();
+        engine.process_block(&mut [0.0; 256]);
+        let stopped = control.transport();
+        assert!(!stopped.playing && !stopped.recording);
+        assert_eq!(stopped.current_sample.0, 123);
+        assert!((stopped.tempo_bpm - 135.0).abs() < f64::EPSILON);
+        assert_eq!(stopped.time_signature.denominator, 8);
+        control.send_transport(TransportCommand::Play).unwrap();
+        engine.process_block(&mut [0.0; 256]);
+        assert!(control.transport().playing);
+        assert_eq!(control.transport().current_sample.0, 251);
+    }
+
+    #[test]
+    fn repeated_stops_invalidate_queued_play_from_an_earlier_generation() {
+        let (mut engine, control) = EngineProcessor::prepare(AudioConfig::DEFAULT).unwrap();
+        let mut output = [0.0; 256];
+        for _ in 0..2000 {
+            control.send_transport(TransportCommand::Play).unwrap();
+            control.send_transport(TransportCommand::Stop).unwrap();
+            control.send_transport(TransportCommand::Stop).unwrap();
+            engine.process_block(&mut output);
+            assert!(!control.transport().playing);
+        }
     }
 }
