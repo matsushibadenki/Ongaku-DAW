@@ -1,0 +1,11 @@
+/target
+/node_modules
+/dist
+/.idea
+/.vscode
+.DS_Store
+*.log
+
+# Temporary design/functionality reference; never include it in this repository.
+# Match Pro-Wave, Pro-wave, pro-wave, and other case variants at any depth.
+[Pp][Rr][Oo]-[Ww][Aa][Vv][Ee]/

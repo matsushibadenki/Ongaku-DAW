@@ -1,0 +1,15 @@
+[package]
+name = "daw-mixer"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+audio-clip = { path = "../audio-clip" }
+audio-types = { path = "../audio-types" }
+daw-core = { path = "../daw-core" }
+
+[lints]
+workspace = true
+

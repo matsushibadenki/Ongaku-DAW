@@ -1,0 +1,18 @@
+[
+  {
+    "date": "2026-08-24",
+    "macrostructure": "Map / Diagram",
+    "theme": "Midnight",
+    "enrichment": "none",
+    "nav": "N9 Edge-aligned minimal",
+    "footer": "Ft2 Inline single line",
+    "brief": "Phase 3 sample-accurate DAW timeline and mixer"
+  },
+  {
+    "date": "2026-08-24",
+    "macrostructure": "Workbench",
+    "theme": "Terminal",
+    "enrichment": "none",
+    "brief": "Phase 1 realtime audio engine verification console"
+  }
+]

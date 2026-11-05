@@ -1,0 +1,22 @@
+[package]
+name = "daw-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+audio-backend = { path = "../audio-backend" }
+audio-engine = { path = "../audio-engine" }
+audio-types = { path = "../audio-types" }
+daw-core = { path = "../daw-core" }
+daw-mixer = { path = "../mixer" }
+daw-project = { path = "../daw-project" }
+
+serde = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints]
+workspace = true

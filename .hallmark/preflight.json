@@ -1,0 +1,9 @@
+{
+  "date": "2026-08-24",
+  "framework": "React + Vite + Tauri 2",
+  "font": "Space Grotesk Variable + IBM Plex Sans + IBM Plex Mono",
+  "palette": "Midnight warm-amber OKLCH tokens",
+  "motion": "cut",
+  "spacing": "4pt scale",
+  "source_mtime_checked": "2026-08-24"
+}

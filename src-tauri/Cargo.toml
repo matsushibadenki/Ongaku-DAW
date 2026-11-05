@@ -1,0 +1,27 @@
+[package]
+name = "ongaku-daw"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lib]
+name = "ongaku_daw_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+audio-backend-cpal = { path = "../crates/audio-backend-cpal" }
+audio-types = { path = "../crates/audio-types" }
+daw-app = { path = "../crates/daw-app" }
+daw-core = { path = "../crates/daw-core" }
+daw-project = { path = "../crates/daw-project" }
+serde = { version = "1", features = ["derive"] }
+tauri = { version = "2", features = [] }
+
+tauri-plugin-dialog = "2"
+
+[lints]
+workspace = true

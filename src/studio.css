@@ -1,0 +1,188 @@
+/* Reference-led DAW surface. Shared controls and engine adapters remain reusable. */
+.studio-shell { --track-header-width: 184px; --browser-width: 208px; font-size: 11px; line-height: 1.35; padding: 0; }
+.studio-shell button, .studio-shell select, .studio-shell input { font-size: 11px; border-radius: 1px; }
+.studio-shell button { transition: background-color 100ms; }
+.studio-shell button:active { transform: none; }
+.studio-shell .app-menu { min-height: 23px; height: 23px; padding: 0 6px; gap: 8px; background: var(--color-paper-3); }
+.studio-shell .app-menu-icon { width: 18px; height: 18px; min-height: 18px; flex-basis: 18px; border: 0; border-radius: 2px; color: var(--color-ink); font-size: 12px; }
+.studio-shell .app-menu-items { gap: 2px; }
+.studio-shell .app-menu-items button { min-height: 20px; padding: 0 7px; font-size: 10px; color: var(--color-ink-2); }
+.studio-shell .app-preferences { top: 23px; width: 280px; max-height: calc(100dvh - 40px); overflow-y: auto; padding: 14px; }
+.studio-shell .app-preferences select { height: 30px; min-height: 30px; }
+.studio-shell .workspace-toolbar { min-height: 30px; height: 30px; padding: 0 6px; background: var(--color-paper-4); }
+.studio-shell .workspace-toolbar-title { font-size: 10px; gap: 14px; }
+.studio-shell .workspace-toolbar-title strong { color: var(--color-ink-2); }
+.studio-shell .workspace-view-actions { gap: 1px; }
+.studio-shell .workspace-view-actions button { display: grid; place-items: center; width: 30px; height: 28px; min-height: 28px; padding: 0; border: 0; }
+.studio-shell .workspace-view-actions button[aria-pressed="true"] { background: var(--color-accent); color: var(--color-key-white); }
+.studio-shell .studio-body { position: relative; flex: 1 1 auto; display: grid; grid-template-columns: minmax(0, 1fr); min-height: 0; overflow: hidden; }
+.studio-shell .studio-body.browser-open { grid-template-columns: minmax(0, 1fr) var(--browser-width); }
+.studio-shell .workspace, .studio-shell .workspace.has-editor, .studio-shell .workspace.has-inspector {
+  display: grid; align-items: stretch; min-height: 0; min-width: 0; overflow: hidden; gap: 0; padding: 0;
+  grid-template-columns: minmax(0, 1fr); grid-template-areas: "error" "arrangement" "editor" "performance";
+  grid-template-rows: auto minmax(0, 1.65fr) minmax(0, 1fr) auto;
+}
+.studio-shell .workspace.has-inspector { grid-template-columns: 150px minmax(0, 1fr); grid-template-areas: "error error" "inspector arrangement" "inspector editor" "performance performance"; }
+.studio-shell .workspace:not(.has-editor) { grid-template-rows: auto minmax(0, 1fr) 0 auto; }
+.studio-shell .editor-map { min-height: 0; grid-area: arrangement; overflow: auto; background: var(--color-paper); }
+.studio-shell .editor-map .timeline-layout { display: grid; grid-template-columns: var(--track-header-width) minmax(0, 1fr); height: 100%; min-height: calc(24px + var(--track-count) * var(--daw-lane-height)); overflow: visible; }
+.studio-shell .editor-map .track-lane-list { display: grid; height: 100%; grid-template-rows: 24px repeat(var(--track-count), var(--daw-lane-height)); align-content: start; border-right: 1px solid var(--color-rule-strong); background: var(--color-paper-2); }
+.studio-shell .track-ruler-spacer { display: flex; align-items: center; padding: 0 8px; font-size: 9px; background: var(--color-paper-2); }
+.studio-shell .track-lane-head { display: grid; min-height: 0; padding: 2px 6px 2px 7px; grid-template-columns: minmax(0, 1fr) auto; grid-template-rows: 20px 18px 18px; gap: 0; align-content: start; border: 0; border-left: 4px solid var(--color-track-rhythm); border-bottom: 1px solid var(--color-paper); background: var(--color-paper-3); overflow: hidden; }
+.studio-shell .track-lane-head[data-role="bass"] { border-left-color: var(--color-track-bass); }
+.studio-shell .track-lane-head[data-role="atmosphere"] { border-left-color: var(--color-track-atmosphere); }
+.studio-shell .track-lane-head[data-role="lead"] { border-left-color: var(--color-track-lead); }
+.studio-shell .track-lane-head.is-selected { background: var(--color-paper-4); }
+.studio-shell .track-lane-head .track-name { display: flex; grid-column: 1; grid-row: 1; min-width: 0; min-height: 18px; height: 18px; gap: 5px; padding: 0; border: 0; background: transparent; align-items: center; font-size: 10px; }
+.studio-shell .track-name span { font-size: 8px; }
+.studio-shell .track-name strong { font-weight: 400; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.studio-shell .track-lane-head .track-toggles { grid-column: 2; grid-row: 1; display: flex; gap: 2px; }
+.studio-shell .track-lane-head .track-toggles button { min-height: 16px; height: 16px; width: 16px; padding: 0; font-size: 9px; border-color: var(--color-rule-strong); }
+.studio-shell .track-lane-head .mini-volume { grid-column: 1 / -1; grid-row: 2; }
+.studio-shell .track-lane-head .mini-slider { grid-column: 1 / -1; grid-row: 3; }
+.studio-shell .track-lane-head .mini-volume, .studio-shell .track-lane-head .mini-slider { grid-template-columns: 28px minmax(0, 1fr) 26px; min-height: 18px; height: 18px; gap: 4px; }
+.studio-shell .mini-control-label { white-space: nowrap; font-size: 9px; }
+.studio-shell .track-lane-head .mini-slider output { display: block; font-size: 8px; }
+.studio-shell .track-lane-head .mini-volume output { display: none; }
+.studio-shell .track-lane-head .track-db { display: block; grid-column: 1 / -1; grid-row: 2; align-self: center; justify-self: end; pointer-events: none; color: var(--color-ink-2); font-size: 8px; }
+.studio-shell .mini-slider-track, .studio-shell .mini-volume-track { height: 3px; background: var(--color-paper); }
+.studio-shell .mini-slider-track::after, .studio-shell .mini-volume-track::after { width: 5px; height: 8px; border-radius: 1px; background: var(--color-ink-2); }
+.studio-shell .editor-map .timeline-canvas-wrap { position: relative; height: 100%; min-height: 0; }
+.studio-shell .timeline-canvas { position: absolute; inset: 0; }
+.studio-shell .detail-region { grid-area: editor; min-height: 0; border-top: 4px solid var(--color-rule-strong); }
+.studio-shell .detail-region-bar { display: none; }
+.studio-shell .detail-region .midi-editor { display: flex; height: 100%; min-height: 0; }
+.studio-shell .detail-region .midi-editor-grid { display: grid; grid-template-columns: var(--track-header-width) minmax(0, 1fr); height: 100%; width: 100%; gap: 0; padding: 0; overflow: hidden; }
+.studio-shell .detail-region .midi-inspector { grid-column: 1; grid-row: 1; padding: 8px; gap: 7px; border: 0; border-right: 1px solid var(--color-rule-strong); background: var(--color-paper-2); font-size: 10px; }
+.studio-shell .midi-inspector strong { font-size: 10px; font-weight: 400; }
+.studio-shell .midi-inspector .inspector-label { font-size: 9px; margin: 0; font-family: var(--font-body); }
+.studio-shell .detail-region .midi-inspector .mini-slider { grid-template-columns: 46px minmax(0, 1fr) 23px; gap: 3px; }
+.studio-shell .midi-inspector .mini-slider output { font-size: 9px; }
+.studio-shell .detail-region .editor-canvases { grid-column: 2; grid-row: 1; display: flex; gap: 0; min-height: 0; overflow: hidden; }
+.studio-shell .editor-view-tabs { height: 23px; min-height: 23px; padding: 0 4px; gap: 0; background: var(--color-paper-3); }
+.studio-shell .editor-view-tabs button { min-height: 23px; padding: 0 9px; font-size: 9px; border-bottom-width: 1px; }
+.studio-shell .editor-view-tabs button[aria-selected="true"] { background: var(--color-accent); color: var(--color-key-white); }
+.studio-shell .editor-canvas-stage { position: relative; min-height: 0; overflow: hidden; }
+.studio-shell .editor-canvas-panel { position: absolute; inset: 0; border: 0; }
+.studio-shell .editor-canvas-panel canvas { position: absolute; inset: 0; }
+.studio-shell .performance-details { grid-area: performance; }
+.studio-shell .performance-details summary { min-height: 17px; height: 17px; padding: 1px 6px; font-size: 8px; }
+.studio-shell .performance-details[open] { max-height: 160px; }
+.studio-shell .track-inspector { grid-area: inspector; }
+.studio-shell .track-inspector-heading, .studio-shell .track-inspector-controls { padding: 8px; gap: 8px; }
+.studio-shell .track-inspector-heading strong { font-size: 12px; }
+.studio-shell .track-inspector-controls { grid-template-columns: minmax(0, 1fr); }
+.studio-shell .track-inspector .mini-slider, .studio-shell .track-inspector .mini-volume { grid-template-columns: 30px minmax(0, 1fr) 25px; }
+.studio-shell .inspector-switches button { min-height: 22px; font-size: 10px; }
+.studio-shell .studio-browser { display: flex; flex-direction: column; min-width: 0; min-height: 0; overflow: hidden; border-left: 3px solid var(--color-rule-strong); background: var(--color-paper-2); }
+.studio-shell .browser-tabs { display: flex; height: 27px; flex: 0 0 auto; background: var(--color-paper-3); border-bottom: 1px solid var(--color-rule-strong); }
+.studio-shell .browser-tabs button { min-height: 27px; padding: 0 10px; border: 0; background: transparent; font-size: 10px; }
+.studio-shell .browser-tabs button[aria-selected="true"] { color: var(--color-accent); border-bottom: 2px solid var(--color-accent); }
+.studio-shell .browser-search { display: flex; align-items: center; gap: 5px; margin: 5px; padding: 0 5px; height: 24px; border: 1px solid var(--color-rule-strong); background: var(--color-paper); color: var(--color-muted); }
+.studio-shell .browser-search input { width: 100%; min-width: 0; border: 0; outline-offset: 1px; background: transparent; color: var(--color-ink); font-size: 10px; }
+.studio-shell .browser-tree { flex: 1 1 auto; min-height: 0; overflow: auto; padding: 6px; }
+.studio-shell .browser-tree-root { display: flex; align-items: center; gap: 6px; height: 25px; color: var(--color-ink-2); font-size: 10px; }
+.studio-shell .browser-tree-group > button { display: flex; align-items: center; width: 100%; min-height: 25px; gap: 6px; padding: 3px 7px 3px 18px; border: 0; background: transparent; text-align: left; font-size: 10px; }
+.studio-shell .browser-tree-group > button.is-selected { background: var(--color-paper-4); color: var(--color-key-white); }
+.studio-shell .browser-tree-group > .browser-clip { padding-left: 31px; color: var(--color-muted); font-size: 9px; justify-content: space-between; }
+.studio-shell .browser-clip span { overflow: hidden; text-overflow: ellipsis; }
+.studio-shell .browser-clip small { white-space: nowrap; font-size: 8px; }
+.studio-shell .browser-no-results { display: block; padding: 10px; color: var(--color-muted); }
+.studio-shell .browser-selection { display: grid; grid-template-columns: 32px minmax(0, 1fr); gap: 4px; padding: 12px 8px; min-height: 100px; background: var(--color-paper-3); border-top: 1px solid var(--color-rule-strong); }
+.studio-shell .browser-selection .icon { grid-row: span 3; color: var(--color-accent); }
+.studio-shell .browser-selection strong { font-size: 11px; }
+.studio-shell .browser-selection span { grid-column: 2; color: var(--color-muted); font-size: 9px; }
+.studio-shell .app-header { display: grid; flex: 0 0 auto; min-height: 44px; height: 44px; grid-template-columns: minmax(110px, 1fr) 138px auto 132px minmax(30px, 1fr); align-items: center; padding: 3px 10px; gap: 10px; background: var(--color-paper); border-top: 1px solid var(--color-rule-strong); border-bottom: 0; }
+.studio-shell .app-header .transport-bar { display: contents; }
+.studio-shell .app-header .transport-actions { grid-area: auto; grid-column: 3; grid-row: 1; display: flex; gap: 3px; overflow: visible; }
+.studio-shell .app-header .transport-readout { grid-area: auto; grid-column: 2; grid-row: 1; display: grid; grid-template-columns: minmax(0, 1fr); gap: 1px; }
+.studio-shell .app-header .position-primary { font-size: 15px; font-weight: 700; letter-spacing: -0.04em; white-space: nowrap; }
+.studio-shell .app-header .position-secondary { display: block; font-size: 9px; color: var(--color-muted); }
+.studio-shell .app-header .tempo-readout { grid-area: auto; grid-column: 4; grid-row: 1; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 7px; min-width: 0; }
+.studio-shell .app-header .tempo-readout div { display: grid; gap: 1px; padding: 0; }
+.studio-shell .app-header .tempo-readout dt { font-size: 8px; }
+.studio-shell .app-header .tempo-readout dd { font-size: 13px; font-weight: 400; }
+.studio-shell .app-header .session-format { grid-column: 1; grid-row: 1; flex-direction: column; align-items: start; gap: 0; font-size: 8px; }
+.studio-shell .app-header .session-format .status-light { display: none; }
+.studio-shell .app-header .engine-button { grid-column: 5; grid-row: 1; justify-self: end; min-height: 28px; height: 28px; width: 28px; padding: 5px; }
+.studio-shell .app-header .engine-button span { display: none; }
+.studio-shell .app-header .play-button, .studio-shell .app-header .icon-button { display: grid; place-items: center; min-height: 27px; height: 27px; width: 27px; min-width: 27px; flex-basis: 27px; padding: 0; border: 0; background: transparent; }
+.studio-shell .app-header .play-button span { display: none; }
+.studio-shell .app-header .play-button { color: var(--color-success); }
+.studio-shell .app-header .play-button[data-state="success"] { background: var(--color-success); color: var(--color-paper); }
+.studio-shell .app-header .icon-button[data-state="success"] { color: var(--color-accent); }
+.studio-shell .status-bar { flex-direction: row; justify-content: space-between; min-height: 17px; height: 17px; padding: 1px 8px; font-size: 8px; gap: 4px; background: var(--color-paper); }
+.studio-shell .status-bar p { gap: 9px; flex-wrap: nowrap; }
+.studio-shell .audio-detail { font-size: 10px; background: var(--color-paper-2); }
+@media (max-width: 900px) {
+  .studio-shell { --track-header-width: 152px; --browser-width: 164px; }
+  .studio-shell .browser-tabs button { padding-inline: 8px; }
+  .studio-shell .app-header { grid-template-columns: minmax(70px, 1fr) 120px auto 106px minmax(28px, 1fr); gap: 6px; }
+  .studio-shell .track-lane-head .track-db { font-size: 7px; }
+}
+@media (max-height: 600px) {
+  :root { --daw-lane-height: 44px; }
+  .studio-shell .track-lane-head { grid-template-rows: 16px 12px 12px; padding-block: 1px; }
+  .studio-shell .track-lane-head .track-name { height: 16px; min-height: 16px; }
+  .studio-shell .track-lane-head .mini-volume, .studio-shell .track-lane-head .mini-slider { min-height: 12px; height: 12px; }
+  .studio-shell .track-lane-head .mini-control-label { font-size: 8px; }
+  .studio-shell .mini-slider-track input, .studio-shell .mini-volume-track input { inset-block: -4px; height: 11px; }
+  .studio-shell .browser-selection { min-height: 70px; padding-block: 7px; }
+}
+@media (max-width: 620px) {
+  .studio-shell { --track-header-width: 130px; }
+  .studio-shell .studio-body.browser-open { grid-template-columns: minmax(0, 1fr); }
+  .studio-shell .studio-browser { position: absolute; right: 0; top: 0; bottom: 0; width: min(220px, 66vw); z-index: 4; }
+  .studio-shell .workspace.has-inspector { grid-template-columns: 120px minmax(0, 1fr); }
+  .studio-shell .app-header { height: 65px; min-height: 65px; grid-template-columns: minmax(0, 1fr) auto 95px; grid-template-rows: 30px 24px; padding: 3px 6px; gap: 2px 5px; }
+  .studio-shell .app-header .transport-readout { grid-column: 1; grid-row: 1; }
+  .studio-shell .app-header .transport-actions { grid-column: 2; grid-row: 1; }
+  .studio-shell .app-header .tempo-readout { grid-column: 3; grid-row: 1; }
+  .studio-shell .app-header .session-format { grid-column: 1 / 3; grid-row: 2; flex-direction: row; gap: 5px; }
+  .studio-shell .app-header .engine-button { grid-column: 3; grid-row: 2; justify-self: end; min-height: 22px; height: 22px; }
+  .studio-shell .app-header .position-primary { font-size: 11px; }
+  .studio-shell .app-header .icon-button, .studio-shell .app-header .play-button { width: 22px; min-width: 22px; flex-basis: 22px; }
+  .studio-shell .status-bar p:first-child { display: none; }
+  .studio-shell .detail-region .midi-inspector { display: none; }
+  .studio-shell .detail-region .midi-editor-grid { grid-template-columns: minmax(0, 1fr); }
+  .studio-shell .detail-region .editor-canvases { grid-column: 1; }
+  .studio-shell .track-name span { display: none; }
+  .studio-shell .track-lane-head .mini-volume, .studio-shell .track-lane-head .mini-slider { grid-template-columns: 24px minmax(0, 1fr) 24px; gap: 2px; }
+}
+
+.midi-edit-tools { display:flex; flex-wrap:wrap; gap:4px; border:0; margin:0 0 8px; padding:0; min-width:0; }
+.midi-edit-tools label { display:flex; align-items:center; gap:4px; font-size:11px; }
+.midi-edit-tools button, .midi-edit-tools select { min-height:26px; }
+.document-menu { position:relative; }
+.document-menu-popup { position:absolute; top:100%; left:0; z-index:50; min-width:210px; padding:4px; background:var(--color-paper-3); border:1px solid var(--color-rule); box-shadow:0 8px 24px #0005; }
+.app-menu-items .document-menu-popup button { width:100%; display:flex; justify-content:space-between; gap:16px; min-height:30px; text-align:left; }
+.document-menu-popup kbd { font:inherit; opacity:.55; }
+.document-indicator { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:11px; opacity:.7; padding:0 8px; }
+.studio-shell .app-menu { position:relative; z-index:60; overflow:visible; }
+.studio-shell .app-menu-items { overflow:visible; }
+.midi-note-fields { border:0; margin:6px 0; padding:0; min-width:0; display:grid; gap:4px; }
+.midi-note-fields label { display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:3px; font-size:10px; }
+.midi-note-fields input { min-width:0; width:64px; max-width:100%; height:23px; padding:2px 4px; border:1px solid var(--color-rule); background:var(--color-paper-3); color:var(--color-ink); font-size:11px; }
+.midi-note-count { font-size:10px; align-self:center; opacity:.65; }
+.midi-gesture-help { float:right; cursor:help; font-size:13px; }
+.piano-roll-canvas { touch-action:none; }
+.editor-view-header { display:flex; flex:0 0 auto; min-width:0; align-items:center; justify-content:space-between; background:var(--color-paper-3); }
+.editor-view-header .editor-view-tabs { flex:1 1 auto; min-width:0; }
+.midi-header-actions { display:flex; align-items:center; gap:4px; padding:0 4px; }
+.midi-header-actions button { min-height:22px; height:22px; width:24px; padding:0; font-size:13px; }
+
+.midi-clip-picker { display:flex; align-items:center; gap:4px; flex:0 0 28px; height:28px; min-width:0; padding:2px 4px; background:var(--color-paper-3); border-bottom:1px solid var(--color-rule); }
+.midi-clip-picker button { min-height:22px; height:22px; padding:0 5px; font-size:10px; flex:0 0 auto; }
+.midi-clip-options { display:flex; gap:3px; min-width:0; flex:1; overflow-x:auto; }
+.midi-clip-options button[aria-pressed="true"] { background:var(--color-paper-4); border-color:var(--color-focus); }
+.midi-clip-options button.is-active { color:var(--color-focus); }
+.studio-shell .detail-region .midi-editor-grid { height:auto; flex:1 1 auto; min-height:0; }
+.midi-clip-picker .midi-gesture-help { flex:0 0 auto; }
+.studio-shell .detail-region .midi-editor { flex-direction:column; }
+
+.midi-clip-tools { display:flex; flex:0 0 30px; align-items:center; gap:5px; min-width:0; width:100%; margin:0; padding:2px 4px; border:0; border-bottom:1px solid var(--color-rule); background:var(--color-paper-2); overflow-x:auto; }
+.midi-clip-tools label { display:flex; align-items:center; gap:4px; flex:0 0 auto; font-size:10px; }
+.midi-clip-tools input { width:58px; min-width:0; height:22px; padding:1px 3px; font-size:11px; background:var(--color-paper-3); color:var(--color-ink); border:1px solid var(--color-rule); }
+.midi-clip-tools button { flex:0 0 25px; min-height:22px; height:22px; padding:0 3px; font-size:13px; }
+.midi-clip-tools .midi-gesture-help { flex:0 0 auto; }
+.timeline-canvas { touch-action:none; }

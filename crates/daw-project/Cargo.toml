@@ -1,0 +1,22 @@
+[package]
+name = "daw-project"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+audio-clip = { path = "../audio-clip" }
+audio-types = { path = "../audio-types" }
+daw-automation = { path = "../automation" }
+daw-core = { path = "../daw-core" }
+daw-midi = { path = "../midi" }
+daw-mixer = { path = "../mixer" }
+daw-waveform = { path = "../waveform" }
+serde = { version = "1", features = ["derive"] }
+
+serde_json = "1"
+tempfile = "3"
+
+[lints]
+workspace = true

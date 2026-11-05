@@ -1,0 +1,17 @@
+[package]
+name = "audio-file"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+audio-types = { path = "../audio-types" }
+hound = "3.5.1"
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints]
+workspace = true
+
