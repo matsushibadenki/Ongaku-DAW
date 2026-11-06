@@ -33,6 +33,8 @@ pub struct DocumentStatus {
 #[derive(Debug, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PublicationStatus {
+    pub stream_readiness: Option<audio_engine::StreamReadinessSnapshot>,
+    pub streaming: daw_project::ProjectStreamingStatus,
     pub document_revision: u64,
     pub requested_revision: Option<u64>,
     pub engine_epoch: u64,
@@ -478,6 +480,11 @@ impl DawApplication {
             .and_then(|status| status.published_revision)
             .or(self.requested_revision);
         PublicationStatus {
+            stream_readiness: self
+                .control
+                .as_ref()
+                .and_then(EngineControl::stream_readiness),
+            streaming: self.project.streaming_status(),
             document_revision: self.revision,
             requested_revision,
             engine_epoch: self.engine_epoch,
@@ -1448,3 +1455,6 @@ mod tests {
         assert_eq!(app.state(), EngineState::Stopped);
     }
 }
+
+#[cfg(test)]
+mod streaming_tests;

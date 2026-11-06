@@ -162,6 +162,7 @@ impl Project {
                     timeline_start: clip.timeline_start,
                     asset,
                     waveform,
+                    stream: super::streaming::MediaCache::default(),
                 });
             }
             for clip in &track.midi_clips {

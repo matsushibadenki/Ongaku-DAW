@@ -120,6 +120,7 @@ version = "0.1.0"
 dependencies = [
  "audio-types",
  "daw-core",
+ "daw-streaming",
 ]
 
 [[package]]
@@ -128,12 +129,15 @@ version = "0.1.0"
 dependencies = [
  "audio-backend",
  "audio-clip",
+ "audio-file",
  "audio-types",
  "daw-automation",
  "daw-core",
  "daw-dsp",
  "daw-midi",
  "daw-mixer",
+ "daw-project",
+ "daw-streaming",
  "rtrb",
  "serde",
 ]
@@ -627,12 +631,14 @@ name = "daw-app"
 version = "0.1.0"
 dependencies = [
  "audio-backend",
+ "audio-clip",
  "audio-engine",
  "audio-types",
  "daw-core",
  "daw-mixer",
  "daw-project",
  "serde",
+ "serde_json",
  "tempfile",
 ]
 
@@ -674,6 +680,7 @@ dependencies = [
  "audio-clip",
  "audio-types",
  "daw-core",
+ "daw-streaming",
  "serde",
 ]
 
@@ -682,11 +689,13 @@ name = "daw-project"
 version = "0.1.0"
 dependencies = [
  "audio-clip",
+ "audio-file",
  "audio-types",
  "daw-automation",
  "daw-core",
  "daw-midi",
  "daw-mixer",
+ "daw-streaming",
  "daw-waveform",
  "serde",
  "serde_json",

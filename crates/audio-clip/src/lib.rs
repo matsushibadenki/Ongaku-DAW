@@ -136,3 +136,85 @@ mod tests {
         assert!(clip.sample_at(SamplePosition(12), 0).abs() < f32::EPSILON);
     }
 }
+
+/// Immutable timeline view backed by a shared, position-addressed streaming cache.
+#[derive(Clone)]
+pub struct StreamedAudioClip {
+    pub timeline_start: SamplePosition,
+    pub source_start_frame: u64,
+    pub duration_frames: u64,
+    pub media: Arc<daw_streaming::TimelineStream>,
+}
+impl StreamedAudioClip {
+    pub fn new(
+        timeline_start: SamplePosition,
+        source_start_frame: u64,
+        duration_frames: u64,
+        media: Arc<daw_streaming::TimelineStream>,
+    ) -> Result<Self, AudioError> {
+        if duration_frames == 0
+            || source_start_frame
+                .checked_add(duration_frames)
+                .is_none_or(|end| end > media.frame_count())
+            || timeline_start.0.checked_add(duration_frames).is_none()
+        {
+            return Err(AudioError::InvalidConfig(
+                "stream clip range exceeds media or timeline",
+            ));
+        }
+        Ok(Self {
+            timeline_start,
+            source_start_frame,
+            duration_frames,
+            media,
+        })
+    }
+    #[must_use]
+    pub fn source_frame_at(&self, position: SamplePosition) -> Option<u64> {
+        position
+            .0
+            .checked_sub(self.timeline_start.0)
+            .filter(|n| *n < self.duration_frames)
+            .map(|n| self.source_start_frame + n)
+    }
+    pub fn add_prepared_frame(
+        &self,
+        position: SamplePosition,
+        output: &mut [f32],
+        window: &daw_streaming::StreamWindow,
+    ) {
+        let Some(source) = self.source_frame_at(position) else {
+            return;
+        };
+        let mut frame = [0.0; 2];
+        window.read_frame(source, &mut frame);
+        for (channel, value) in output.iter_mut().enumerate() {
+            *value += frame[channel.min(1)];
+        }
+    }
+
+    pub fn request_at(&self, position: SamplePosition) {
+        if let Some(relative) = position
+            .0
+            .checked_sub(self.timeline_start.0)
+            .filter(|n| *n < self.duration_frames)
+        {
+            self.media.request_frame(self.source_start_frame + relative);
+        }
+    }
+    pub fn add_frame(&self, position: SamplePosition, output: &mut [f32]) {
+        let Some(relative) = position
+            .0
+            .checked_sub(self.timeline_start.0)
+            .filter(|n| *n < self.duration_frames)
+        else {
+            return;
+        };
+        let mut frame = [0.0; 2];
+        self.media
+            .read_frame(self.source_start_frame + relative, &mut frame);
+        for (channel, value) in output.iter_mut().enumerate() {
+            *value += frame[channel.min(1)];
+        }
+    }
+}

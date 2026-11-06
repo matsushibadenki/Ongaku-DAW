@@ -1,4 +1,5 @@
 const paths = {
+  alert: <path d="m12 3 10 18H2Zm0 6v5m0 3h.01" />,
   panel: <path d="M3 4h18v16H3ZM8 4v16" />,
   editor: <path d="M3 4h18v16H3ZM3 11h18m-13 3v3m4-3v3m4-3v3" />,
   browser: <path d="M3 4h18v16H3Zm13 0v16m-9-12h5m-5 4h5" />,

@@ -1,5 +1,7 @@
 //! Shared, backend-independent contracts for the audio system.
 
+mod readiness;
+pub use readiness::{StreamReadiness, StreamReadinessState};
 mod preparation;
 pub use preparation::{PreparationCheck, PreparationToken, preparation_sort_by};
 

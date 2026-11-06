@@ -1,6 +1,6 @@
 //! UI-independent project model and prepared graph construction.
 
-use audio_clip::{AudioClip, PcmAsset};
+use audio_clip::{PcmAsset, StreamedAudioClip};
 use audio_types::{AudioConfig, AudioError, PreparationCheck, PreparationToken};
 use daw_automation::{AutomationCurve, AutomationLane, AutomationParameter, AutomationPoint};
 use daw_core::{SamplePosition, transport::TimeSignature};
@@ -16,6 +16,7 @@ mod mixer_edit;
 mod multi_clip;
 mod selection;
 mod storage;
+mod streaming;
 pub use clip_edit::{MidiClipEdit, MidiClipTarget};
 pub use multi_clip::MidiNoteTarget;
 pub use selection::MidiSelectionEdit;
@@ -74,6 +75,7 @@ struct ProjectClip {
     timeline_start: SamplePosition,
     asset: Arc<PcmAsset>,
     waveform: WaveformPyramid,
+    stream: streaming::MediaCache,
 }
 
 #[derive(Clone)]
@@ -100,7 +102,35 @@ pub struct Project {
     tracks: Vec<ProjectTrack>,
 }
 
+#[derive(Clone, Copy, Debug, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectStreamingStatus {
+    pub prepared_media: u64,
+    pub underrun_frames: u64,
+    pub page_reads: u64,
+    pub worker_errors: u64,
+    pub failed_media: u64,
+}
+
 impl Project {
+    /// Control-thread diagnostics; never waits for media preparation.
+    #[must_use]
+    pub fn streaming_status(&self) -> ProjectStreamingStatus {
+        let mut status = ProjectStreamingStatus::default();
+        for clip in self.tracks.iter().flat_map(|track| &track.clips) {
+            if let Some(snapshot) = clip.stream.snapshot() {
+                status.prepared_media += 1;
+                status.underrun_frames = status
+                    .underrun_frames
+                    .saturating_add(snapshot.underrun_frames);
+                status.page_reads = status.page_reads.saturating_add(snapshot.page_reads);
+                status.worker_errors = status.worker_errors.saturating_add(snapshot.worker_errors);
+                status.failed_media += u64::from(snapshot.worker_failed);
+            }
+        }
+        status
+    }
+
     pub fn demo(sample_rate: u32) -> Result<Self, AudioError> {
         if sample_rate == 0 {
             return Err(AudioError::InvalidConfig(
@@ -146,6 +176,7 @@ impl Project {
                     timeline_start: SamplePosition(start),
                     asset,
                     waveform,
+                    stream: streaming::MediaCache::default(),
                 }],
                 midi_clips: Vec::new(),
                 automation_lanes: Vec::new(),
@@ -228,12 +259,12 @@ impl Project {
             track.set_solo(project_track.solo);
             for project_clip in &project_track.clips {
                 check.checkpoint()?;
-                track.add_clip(AudioClip::new(
+                track.add_streamed_clip(StreamedAudioClip::new(
                     project_clip.timeline_start,
                     0,
                     project_clip.asset.frame_count(),
-                    Arc::clone(&project_clip.asset),
-                )?);
+                    project_clip.stream.prepare(&project_clip.asset, check)?,
+                )?)?;
             }
             if !project_track.midi_clips.is_empty() {
                 let automation = project_track
@@ -764,3 +795,6 @@ mod tests {
         assert!((lead.automation_lanes[0].points()[1].value - 0.35).abs() < f32::EPSILON);
     }
 }
+
+#[cfg(test)]
+mod streaming_tests;

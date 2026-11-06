@@ -1,5 +1,6 @@
 export const messages = {
   en: {
+    streamReady: "Audio window ready", streamWaiting: "Waiting for audio; playback position held", streamFailed: "Audio read failed; playback position held", streamCapacity: "Audio window exceeds cache capacity; playback position held", streamPages: "pages",
     graphPreparation: "Preparing audio update",
     editTiming: "Edit timing", lateEditNotice: "A scheduled edit was applied late.", adoptionHistoryNotice: "Some playback update confirmations are no longer available. Check the current audio revision.", audioRevision: "Audio R", graphRevisionHelp: "Adopted / accepted audio graph revision",
     clipOperations: "MIDI clip operations", duplicateClips: "Duplicate selected MIDI clips", splitClips: "Split selected MIDI clips at playhead", clipPosition: "Position (beats)", clipLeft: "Left edge (beats)", clipRight: "Right edge (beats)", clipOperationHelp: "Drag clip bodies to move; Alt-drag duplicates; drag edges to trim (1/16 snap). Numeric fields show the active clip and apply a common delta to selected clips. Trim removes or shortens notes outside the new range; extending adds silence. Undo restores trimmed notes. Split cuts crossing notes into two, retriggering on the right. Copies use available space and may overlap when no room remains. With Arrangement focused, Cmd/Ctrl+D duplicates and S splits. Escape cancels a drag.",
@@ -37,6 +38,7 @@ export const messages = {
     trackRoles: { rhythm: "Rhythm", bass: "Bass", atmosphere: "Atmosphere", lead: "Lead" },
   },
   ja: {
+    streamReady: "音声の読込準備完了", streamWaiting: "音声の読込待ち・再生位置を保持中", streamFailed: "音声の読込失敗・再生位置を保持中", streamCapacity: "音声の読込範囲がキャッシュ容量を超過・再生位置を保持中", streamPages: "ページ",
     graphPreparation: "音声更新を準備中",
     editTiming: "編集の反映時刻", lateEditNotice: "指定位置を過ぎてから編集が反映されました。", adoptionHistoryNotice: "一部の再生更新の確認記録を取得できませんでした。現在の音声リビジョンを確認してください。", audioRevision: "音声 R", graphRevisionHelp: "採用済み / 受付済みの音声グラフリビジョン",
     clipOperations: "MIDIクリップ操作", duplicateClips: "選択MIDIクリップを複製", splitClips: "選択MIDIクリップを再生位置で分割", clipPosition: "位置（拍）", clipLeft: "左端（拍）", clipRight: "右端（拍）", clipOperationHelp: "本体ドラッグで移動、Altドラッグで複製、左右端でトリム（1/16スナップ）。数値はアクティブクリップを示し、選択全体へ同じ変更量を適用します。トリム外のノートは削除・切り詰め、広げた範囲は無音です。Undoで復元できます。分割点をまたぐノートは左右に分け、右側で再発音します。複製先は残りの範囲内に収め、余白がなければ重なります。ArrangementにフォーカスしてCmd/Ctrl+Dで複製、Sで分割。Escapeでドラッグ取消。",
@@ -74,6 +76,7 @@ export const messages = {
     trackRoles: { rhythm: "リズム", bass: "ベース", atmosphere: "空気感", lead: "リード" },
   },
   zh: {
+    streamReady: "音频窗口已就绪", streamWaiting: "正在等待音频，播放位置已保持", streamFailed: "音频读取失败，播放位置已保持", streamCapacity: "音频窗口超出缓存容量，播放位置已保持", streamPages: "页",
     graphPreparation: "正在准备音频更新",
     editTiming: "编辑应用时间", lateEditNotice: "编辑在指定位置之后才应用。", adoptionHistoryNotice: "部分播放更新的确认记录已不可用。请检查当前音频修订版本。", audioRevision: "音频 R", graphRevisionHelp: "已采用 / 已接受的音频图修订版本",
     clipOperations: "MIDI片段操作", duplicateClips: "复制所选MIDI片段", splitClips: "在播放头处分割所选MIDI片段", clipPosition: "位置（拍）", clipLeft: "左边缘（拍）", clipRight: "右边缘（拍）", clipOperationHelp: "拖动片段移动，Alt拖动复制，拖动边缘裁剪（1/16吸附）。数值显示当前片段，并对所选片段应用相同改变量。裁剪会移除或截短范围外音符，扩展部分保持静音，可撤销恢复。跨分割点音符分为两段，右侧重新触发。空间不足时副本可能重叠。聚焦编曲区时Cmd/Ctrl+D复制，S分割，Escape取消拖动。",

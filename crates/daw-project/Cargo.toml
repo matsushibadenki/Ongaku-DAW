@@ -6,6 +6,8 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+audio-file = { path = "../audio-file" }
+daw-streaming = { path = "../streaming" }
 audio-clip = { path = "../audio-clip" }
 audio-types = { path = "../audio-types" }
 daw-automation = { path = "../automation" }

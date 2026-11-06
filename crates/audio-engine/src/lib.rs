@@ -1,6 +1,11 @@
 //! Device-independent realtime audio engine.
 #![cfg_attr(test, allow(unsafe_code))]
 
+mod readiness;
+#[cfg(test)]
+mod readiness_tests;
+use readiness::ReadinessReceipt;
+pub use readiness::StreamReadinessSnapshot;
 mod metrics;
 mod pending;
 mod publication;
@@ -14,6 +19,7 @@ pub use metrics::RealtimeMetrics;
 
 use audio_backend::{AudioCallback, RealtimeEventSink};
 use audio_types::{AudioConfig, AudioError, RealtimeMetricsSnapshot};
+pub use audio_types::{StreamReadiness, StreamReadinessState};
 use daw_core::transport::{Transport, TransportCommand, TransportSnapshot};
 use daw_dsp::graph::PhaseOneGraph;
 use daw_mixer::AudioGraph;
@@ -66,10 +72,22 @@ impl EngineGraph {
         Self::Timeline(graph)
     }
 
-    fn process(&mut self, output: &mut [f32], transport: &Transport) {
+    fn process(&mut self, output: &mut [f32], transport: &Transport) -> StreamReadiness {
         match self {
-            Self::TestTone(graph) => graph.process(output),
-            Self::Timeline(graph) => graph.process(output, transport),
+            Self::TestTone(graph) => {
+                graph.process(output);
+                if transport.snapshot().playing {
+                    StreamReadiness::ready()
+                } else {
+                    StreamReadiness::default()
+                }
+            }
+            Self::Timeline(graph) => graph.process_with_readiness(output, transport),
+        }
+    }
+    fn cancel_streaming(&mut self) {
+        if let Self::Timeline(graph) = self {
+            graph.cancel_streaming();
         }
     }
 
@@ -177,6 +195,7 @@ impl SharedTransport {
 #[derive(Clone)]
 pub struct EngineControl {
     gain_bits: Arc<AtomicU32>,
+    readiness: Arc<ReadinessReceipt>,
     metrics: Arc<RealtimeMetrics>,
     graph_updates: Arc<Mutex<GraphPublisher>>,
     publications: Arc<PublicationReceipts>,
@@ -357,6 +376,12 @@ impl EngineControl {
             .map_err(|_| AudioError::Backend("transport command queue is full".into()))
     }
 
+    /// Last completed callback's admission, keyed to its actual adopted graph and transport generation.
+    #[must_use]
+    pub fn stream_readiness(&self) -> Option<StreamReadinessSnapshot> {
+        self.readiness.snapshot()
+    }
+
     #[must_use]
     pub fn transport(&self) -> TransportSnapshot {
         self.transport.snapshot()
@@ -391,6 +416,10 @@ pub struct EngineProcessor {
     transport: Transport,
     applied_stop_generation: u64,
     shared_transport: Arc<SharedTransport>,
+    readiness: Arc<ReadinessReceipt>,
+    active_graph_revision: u64,
+    transport_generation: u64,
+    waiting_callbacks: u64,
 }
 
 impl EngineProcessor {
@@ -400,6 +429,7 @@ impl EngineProcessor {
         let initial_gain = 0.25_f32;
         let gain_bits = Arc::new(AtomicU32::new(initial_gain.to_bits()));
         let metrics = Arc::new(RealtimeMetrics::new(config.callback_deadline_ns()));
+        let readiness = Arc::new(ReadinessReceipt::default());
         let mut graph = EngineGraph::test_tone(config);
         graph.set_test_tone_gain(initial_gain);
         let (graph_producer, graph_consumer) = RingBuffer::new(GRAPH_QUEUE_CAPACITY);
@@ -424,9 +454,14 @@ impl EngineProcessor {
             transport: Transport::new(config.sample_rate),
             applied_stop_generation: 0,
             shared_transport: Arc::clone(&shared_transport),
+            readiness: Arc::clone(&readiness),
+            active_graph_revision: 0,
+            transport_generation: 0,
+            waiting_callbacks: 0,
         };
         let control = EngineControl {
             gain_bits,
+            readiness,
             metrics,
             graph_updates: Arc::new(Mutex::new(GraphPublisher {
                 queue: graph_producer,
@@ -449,6 +484,7 @@ impl EngineProcessor {
     /// Allocation-free and lock-free processing for an interleaved output block.
     pub fn process_block(&mut self, output: &mut [f32]) {
         let started = std::time::Instant::now();
+        let previous_transport = self.transport.snapshot();
         self.apply_stop_barrier();
         for _ in 0..TRANSPORT_QUEUE_CAPACITY {
             let Ok(request) = self.transport_commands.pop() else {
@@ -461,10 +497,21 @@ impl EngineProcessor {
             if !starts_playback || request.stop_generation == self.applied_stop_generation {
                 // Tempo, meter, loop and seek updates are not discarded by a stop.
                 self.transport.apply(request.command);
+                self.transport_generation = self
+                    .transport_generation
+                    .saturating_add(1)
+                    .min(MAX_PUBLICATION_REVISION);
             }
         }
         // A stop arriving during command draining still wins before rendering this block.
         self.apply_stop_barrier();
+        let current_transport = self.transport.snapshot();
+        if previous_transport.current_sample != current_transport.current_sample
+            || previous_transport.loop_range != current_transport.loop_range
+            || previous_transport.playing != current_transport.playing
+        {
+            self.graph.cancel_streaming();
+        }
         // Adoption/deadline position must include this callback's seek/loop/stop commands.
         self.apply_graph_update();
         let requested_gain = self.gain_bits.load(Ordering::Acquire);
@@ -473,9 +520,29 @@ impl EngineProcessor {
                 .set_test_tone_gain(f32::from_bits(requested_gain));
             self.applied_gain_bits = requested_gain;
         }
-        self.graph.process(output, &self.transport);
+        let position = self.transport.snapshot().current_sample;
+        let readiness = self.graph.process(output, &self.transport);
         let frames = output.len() / usize::from(self.config.channels);
-        self.transport.advance(frames);
+        let rendered = if readiness.state == StreamReadinessState::Ready {
+            frames
+        } else {
+            0
+        };
+        if readiness.state == StreamReadinessState::Waiting {
+            self.waiting_callbacks = self.waiting_callbacks.saturating_add(1);
+        }
+        // The complete audio/MIDI/mixer timeline is held on unavailable data, never
+        // advanced behind a silent hole or reconstructed from late sequential PCM.
+        self.transport.advance(rendered);
+        self.readiness.publish(StreamReadinessSnapshot {
+            graph_revision: self.active_graph_revision,
+            transport_generation: self.transport_generation,
+            position,
+            requested_frames: frames as u64,
+            rendered_frames: rendered as u64,
+            waiting_callbacks: self.waiting_callbacks,
+            readiness,
+        });
         self.shared_transport.publish(self.transport.snapshot());
         self.shared_transport
             .stop_applied
@@ -489,6 +556,10 @@ impl EngineProcessor {
         if generation != self.applied_stop_generation {
             self.transport.apply(TransportCommand::Stop);
             self.applied_stop_generation = generation;
+            self.transport_generation = self
+                .transport_generation
+                .saturating_add(1)
+                .min(MAX_PUBLICATION_REVISION);
         }
     }
 
@@ -523,7 +594,9 @@ impl EngineProcessor {
                     }
                     next.inherit_state(previous, snapshot.current_sample);
                 }
+                self.graph.cancel_streaming();
                 graph = std::mem::replace(&mut self.graph, graph);
+                self.active_graph_revision = revision;
             }
             if let Err(PushError::Full(graph)) = self.retired_graphs.push(graph) {
                 self.retired_fallback = Some(graph);
@@ -628,6 +701,59 @@ mod tests {
 
     #[global_allocator]
     static ALLOCATOR: RealtimeTrackingAllocator = RealtimeTrackingAllocator;
+
+    pub(super) fn assert_no_realtime_memory(work: impl FnOnce()) {
+        let before = REALTIME_MEMORY_EVENTS.load(Ordering::Relaxed);
+        IN_REALTIME_TEST.with(|flag| flag.set(true));
+        work();
+        IN_REALTIME_TEST.with(|flag| flag.set(false));
+        assert_eq!(REALTIME_MEMORY_EVENTS.load(Ordering::Relaxed), before);
+    }
+
+    #[test]
+    fn project_stream_seek_loop_and_graph_adoption_do_not_allocate_or_free() {
+        let config = AudioConfig {
+            sample_rate: 8000,
+            ..AudioConfig::DEFAULT
+        };
+        let project = daw_project::Project::demo(config.sample_rate).unwrap();
+        let (mut engine, control) = EngineProcessor::prepare(config).unwrap();
+        control
+            .submit_graph(EngineGraph::timeline(
+                project.build_audio_graph(config).unwrap(),
+            ))
+            .unwrap();
+        control
+            .send_transport(TransportCommand::SetLoop(daw_core::SampleRange::new(
+                SamplePosition(13),
+                SamplePosition(51),
+            )))
+            .unwrap();
+        control.send_transport(TransportCommand::Play).unwrap();
+        engine.process_block(&mut [0.0; 34]);
+        for position in [14, 50, 20000, 17] {
+            if position == 20000 {
+                control
+                    .send_transport(TransportCommand::SetLoop(None))
+                    .unwrap();
+            }
+            control
+                .submit_graph(EngineGraph::timeline(
+                    project.build_audio_graph(config).unwrap(),
+                ))
+                .unwrap();
+            control
+                .send_transport(TransportCommand::Seek(SamplePosition(position)))
+                .unwrap();
+            let mut output = [0.0; 514];
+            let before = REALTIME_MEMORY_EVENTS.load(Ordering::Relaxed);
+            IN_REALTIME_TEST.with(|flag| flag.set(true));
+            engine.process_block(&mut output);
+            IN_REALTIME_TEST.with(|flag| flag.set(false));
+            assert_eq!(REALTIME_MEMORY_EVENTS.load(Ordering::Relaxed), before);
+            control.reclaim_retired().unwrap();
+        }
+    }
 
     #[test]
     fn renders_a_finite_non_silent_test_tone() {

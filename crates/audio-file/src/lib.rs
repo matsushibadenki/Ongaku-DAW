@@ -8,6 +8,9 @@ use std::{
     path::Path,
 };
 
+/// Background-only interleaved decoding. Format is fixed for the reader lifetime.
+/// Reads return at most `output.len()` samples; partial frames may span reads. Zero is end of stream.
+/// Seek positions are complete audio frames, not interleaved sample offsets.
 pub trait AudioFrameReader: Send {
     fn sample_rate(&self) -> u32;
     fn channels(&self) -> u16;

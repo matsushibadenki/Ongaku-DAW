@@ -15,6 +15,9 @@ rtrb = "0.3.4"
 serde = { version = "1", features = ["derive"] }
 
 [dev-dependencies]
+audio-file = { path = "../audio-file" }
+daw-streaming = { path = "../streaming" }
+daw-project = { path = "../daw-project" }
 audio-clip = { path = "../audio-clip" }
 daw-automation = { path = "../automation" }
 daw-midi = { path = "../midi" }

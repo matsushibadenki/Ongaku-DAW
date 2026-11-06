@@ -170,3 +170,44 @@ UI flow: `http://127.0.0.1:5175/` → preparation fixture pending with unchanged
 🟠 [Next] Document validation/cloning, startup, import/decoder/analysis jobs and future processors need separate cancellation contracts. Allocation/container operations can complete before the next checkpoint. Proactive deadline admission and measured overload cancellation latency remain unfinished. ⭕️ [Pending] Physical timing/listening, device/failure matrix and endurance tests remain pending. No Pro-Wave source was read or reused.
 
 Seventh-batch verification: Rust 1.93.0 Debug and Release workspace suites each pass **114 tests**. Existing callback allocation/free, MIDI/automation/loop/partition and adoption-revision gates remain passing. Clippy reports existing project/MIDI-test warnings only. Node 22.17.1 mixer/MIDI API tests and production frontend build pass; formatting, documentation links and whitespace checks pass.
+
+## Eighth batch — streaming handoff and frame integrity
+
+Date: 2026-11-06. The streaming foundation is exercised independently of native project playback, which currently uses in-memory PCM. No Pro-Wave source or assets were read or reused.
+
+🟢 [Done] Two regression tests first reproduced stale audio after accepted seek and split stereo frame delivery against the previous implementation. Accepted requests now invalidate old data before decoder acknowledgement. Requested/applied generations, queued seek coalescing and stale in-flight decode rejection preserve the handoff. Queue rejection does not advance the accepted generation.
+
+🟢 [Done] Complete-frame consumption, short-read carry, channel resynchronization, newer-generation lookahead and bounded stale draining prevent channel shifts. Aligned read-ahead is capped at two seconds. Consumer buffers are prepared off audio; allocation/free instrumentation includes stale stereo handoff. EOF is generation-tagged; seek waits, starvation and terminal decoder errors are separately observable. Invalid read counts, truncated final frames and failed seeks fault safely.
+
+🟢 [Done] Rust 1.93.0 Debug and Release workspace suites pass **125 tests** each, including **14 streaming tests**. The PCM oracle covers variable reader/callback partitions; a gated decoder proves superseded reads cannot replay. Queue bounds, coalescing, rejection, generation exhaustion, fault visibility and known-EOF behavior pass. `cargo fmt --all --check` and `cargo clippy --workspace --all-targets --offline` complete; existing project/MIDI warnings remain, with no streaming warnings.
+
+Reproduce using the installed pinned toolchain:
+
+```sh
+toolchain_bin="$(dirname "$(rustup which --toolchain 1.93.0 cargo)")"
+export PATH="$toolchain_bin:$PATH"
+cargo fmt --all --check
+cargo test --workspace --offline
+cargo test --workspace --release --offline
+cargo clippy --workspace --all-targets --offline
+```
+
+🟠 [Next] Project/loop/graph streaming integration, timeline/readiness guarantees, multi-stream budgets, decoder cancellation and recovery remain open. Controller shutdown joins off audio but cannot interrupt blocking reader I/O. ⭕️ [Pending] Physical storage/device latency, loopback/listening and endurance qualification remain untested. See the [streaming contract](STREAMING_VALIDATION.md); these software tests do not close the P0 release gates.
+
+## Ninth batch — native project streaming and timeline continuity
+
+Date: 2026-11-06. Native project audio now uses immutable private backing files and shared position-addressed caches. The sequential streaming API remains separate. No Pro-Wave source or assets were read or reused.
+
+🟢 [Done] Initial graph preparation spools embedded PCM off audio and warms a bounded cache. History/document clones and prepared graphs retain the same media identity, worker and ready pages. Seek/loop positions map to exact source frames inside callback chunks; half-open clip boundaries and source offsets are explicit. Old disk work may finish, but its page address cannot be reused as a sequential cursor at a new position. The latest pending missing-position demand supersedes older ones and takes priority over bounded prefetch hints.
+
+🟢 [Done] Non-wrapping odd/even page versions and atomic sample bits prevent mixed stereo frames during eviction, including same-address ABA. Readers never spin or wait: a missing/concurrently replaced frame is zeroed and counted. Loop-head hints and forward lookahead remain nonblocking. Worker I/O/count/EOF faults and panics become observable terminal failures. Native publication status carries current-document streaming counters; diagnostics do not wait for preparation locks. Generic cache pages, payload duration and mailboxes have fixed limits.
+
+🟢 [Done] Independent direct-PCM graph oracles cover timeline/clip edges, seeks, short loops, callback partitions, graph updates and edited/restored mixer targets. Actual application Undo/Redo, reorder, pending graph coalescing and adoption receipts preserve warm-cache page counts. Audible Gain/Pan/Mute history matches direct PCM and existing ramp behavior. Save/load creates fresh media identities with identical output; runtime state is not serialized. A cold project seek returns silence or the exact requested frame and recovers at the current source position. A blocked old read followed by new demands, concurrent eviction, short decoder reads, terminal storage faults and canceled preparation also pass.
+
+🟢 [Done] Allocation/free instrumentation covers cache hits/misses/prefetch and full engine project-stream graph adoption, loop and seek callbacks. No allocations or frees are observed in these callback paths. Final resource destruction and worker joins remain on control/preparation/reclamation threads.
+
+Final verification: **136 tests pass in each of Debug and Release**, including 19 streaming, 24 project, 21 application and 31 engine tests. No new warnings are reported for the added code; existing project/MIDI Clippy warnings remain. Verification commands use Rust 1.93.0 and the pinned-toolchain `PATH` shown in the eighth batch: Debug/Release workspace tests, `cargo fmt --all --check`, and `cargo clippy --workspace --all-targets --offline`. The existing cancellation fixture initially exceeded its five-second held-worker gate during parallel JSON save/load testing; isolated execution passed in 1.38 seconds. Its test-only deadlock guard is now 30 seconds, with no change to production audio timing or cancellation policy. This gate is not a latency benchmark.
+
+🟠 [Next] Readiness acknowledgements/admission for scheduled cold seeks, large-loop prefetch, multi-stream resource/fairness budgets, interruptible I/O and automatic recovery. Full document PCM remains resident and is also spooled to temporary backing; import/storage that avoids that duplication is separate work. A retained document/history keeps idle media workers available. Worker faults currently require reopening the project for fresh media preparation.
+
+⭕️ [Pending] Physical storage and device stalls, loopback/listening, measured atomic-cache overhead, cross-platform file lifecycle and endurance qualification. Warm-fixture PCM equality does not guarantee gap-free arbitrary cold seeks or playback under overload. See the [streaming contract](STREAMING_VALIDATION.md).

@@ -1,11 +1,14 @@
 //! Prepared realtime mixer graph. Topology changes are built off the audio thread.
 
 mod events;
-use audio_clip::AudioClip;
+use audio_clip::{AudioClip, StreamedAudioClip};
 use audio_types::{AudioConfig, AudioError, RealtimeAudioSource};
+pub use audio_types::{StreamReadiness, StreamReadinessState};
 use daw_core::{SamplePosition, transport::Transport};
+use daw_streaming::{StreamWindow, TimelineStream};
 use events::{Controls, PreparedMixerEvents};
 pub use events::{MAX_MIXER_EVENTS_PER_TRACK, MixerChange, MixerEvent, validate_mixer_events};
+use std::sync::Arc;
 
 /// A prepared source whose output is derived from the engine Transport timeline.
 /// Implementations run in the audio callback and must not allocate, lock, or perform I/O.
@@ -88,6 +91,8 @@ fn ramp_samples(sample_rate: u32) -> u32 {
 pub struct Track {
     id: TrackId,
     clips: Vec<AudioClip>,
+    streamed_clips: Vec<StreamedAudioClip>,
+    stream_scratch: Vec<f32>,
     gain: f32,
     pan: f32,
     mute: bool,
@@ -116,6 +121,8 @@ impl Track {
         Self {
             id,
             clips: Vec::new(),
+            streamed_clips: Vec::new(),
+            stream_scratch: Vec::new(),
             gain: 1.0,
             pan: 0.0,
             mute: false,
@@ -136,6 +143,21 @@ impl Track {
 
     pub fn add_clip(&mut self, clip: AudioClip) {
         self.clips.push(clip);
+    }
+
+    pub fn add_streamed_clip(&mut self, clip: StreamedAudioClip) -> Result<(), AudioError> {
+        if self.prepared_config.is_some() {
+            return Err(AudioError::InvalidState(
+                "stream topology must be rebuilt before preparation",
+            ));
+        }
+        self.streamed_clips.push(clip);
+        Ok(())
+    }
+
+    #[must_use]
+    pub fn streamed_clips(&self) -> &[StreamedAudioClip] {
+        &self.streamed_clips
     }
 
     #[must_use]
@@ -273,6 +295,19 @@ impl Track {
 
     fn prepare(&mut self, config: AudioConfig) -> Result<(), AudioError> {
         self.prepared_config = Some(config);
+        if self
+            .streamed_clips
+            .iter()
+            .any(|clip| clip.media.sample_rate() != config.sample_rate)
+        {
+            return Err(AudioError::InvalidConfig(
+                "stream sample rate must match graph",
+            ));
+        }
+        self.stream_scratch.resize(
+            config.buffer_size as usize * usize::from(config.channels),
+            0.0,
+        );
         if let Some(source) = &mut self.realtime_source {
             prepare_source(source, config)?;
         }
@@ -316,6 +351,51 @@ impl Track {
         source
             .source
             .render_interleaved(scratch, transport, frame_offset);
+    }
+
+    fn render_streams(
+        &mut self,
+        sample_count: usize,
+        transport: &Transport,
+        frame_offset: usize,
+        channels: usize,
+        windows: &[PreparedStreamWindow],
+    ) {
+        let scratch = &mut self.stream_scratch[..sample_count];
+        scratch.fill(0.0);
+        for clip in &self.streamed_clips {
+            let Some(window) = windows
+                .iter()
+                .find(|group| Arc::ptr_eq(&group.media, &clip.media))
+                .and_then(|group| group.window.as_ref())
+            else {
+                continue;
+            };
+            // Keep the loop head warm even when the boundary lies inside this callback.
+            if let Some(range) = transport.snapshot().loop_range {
+                clip.request_at(range.start);
+            }
+            clip.request_at(transport.sample_at_offset(frame_offset));
+            // Follow the Transport loop rather than decoding beyond its tail. An
+            // unrelated forward-media page must not evict a fully cached short loop.
+            let lead = self
+                .prepared_config
+                .map_or(0, |config| config.sample_rate as usize / 16);
+            clip.request_at(
+                transport.sample_at_offset(
+                    frame_offset
+                        .saturating_add(sample_count / channels)
+                        .saturating_add(lead),
+                ),
+            );
+            for (offset, frame) in scratch.chunks_exact_mut(channels).enumerate() {
+                clip.add_prepared_frame(
+                    transport.sample_at_offset(frame_offset + offset),
+                    frame,
+                    window,
+                );
+            }
+        }
     }
 
     fn timeline_sample(&self, sample_index: usize) -> f32 {
@@ -374,11 +454,28 @@ fn pan_gain(pan: f32, channel: usize, output_channels: usize) -> f32 {
     }
 }
 
+struct PreparedStreamWindow {
+    media: Arc<TimelineStream>,
+    window: Option<StreamWindow>,
+}
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct StreamWindowKey {
+    position: SamplePosition,
+    loop_range: Option<daw_core::SampleRange>,
+    frames: usize,
+}
+
+struct PreparedRuntime {
+    windows: Vec<PreparedStreamWindow>,
+    key: Option<StreamWindowKey>,
+    master_ramp: MixRamp,
+}
+
 pub struct AudioGraph {
     config: AudioConfig,
     tracks: Vec<Track>,
     master_gain: f32,
-    master_ramp: MixRamp,
+    runtime: Box<PreparedRuntime>,
 }
 
 impl AudioGraph {
@@ -387,7 +484,11 @@ impl AudioGraph {
             config: config.validate()?,
             tracks: Vec::new(),
             master_gain: 1.0,
-            master_ramp: MixRamp::new(),
+            runtime: Box::new(PreparedRuntime {
+                windows: Vec::new(),
+                key: None,
+                master_ramp: MixRamp::new(),
+            }),
         })
     }
 
@@ -405,6 +506,22 @@ impl AudioGraph {
             ));
         }
         track.prepare(self.config)?;
+        // Group all views of one immutable media object so their union is admitted
+        // against a single capacity budget, even across different tracks.
+        self.release_streaming();
+        for clip in &track.streamed_clips {
+            if !self
+                .runtime
+                .windows
+                .iter()
+                .any(|group| Arc::ptr_eq(&group.media, &clip.media))
+            {
+                self.runtime.windows.push(PreparedStreamWindow {
+                    media: Arc::clone(&clip.media),
+                    window: None,
+                });
+            }
+        }
         self.tracks.push(track);
         Ok(())
     }
@@ -442,10 +559,18 @@ impl AudioGraph {
     }
 
     pub fn remove_track(&mut self, id: TrackId) -> Option<Track> {
-        self.tracks
-            .iter()
-            .position(|track| track.id == id)
-            .map(|index| self.tracks.remove(index))
+        let index = self.tracks.iter().position(|track| track.id == id)?;
+        self.release_streaming();
+        let removed = self.tracks.remove(index);
+        self.runtime.windows.retain(|group| {
+            self.tracks.iter().any(|track| {
+                track
+                    .streamed_clips
+                    .iter()
+                    .any(|clip| Arc::ptr_eq(&clip.media, &group.media))
+            })
+        });
+        Some(removed)
     }
 
     /// Compare the final prepared schedule to the graph actually sounding, without allocation.
@@ -478,12 +603,13 @@ impl AudioGraph {
     }
 
     /// Match stable track IDs, independent of ordering. Unknown source types keep fresh state.
-    /// Pull streams are intentionally not transplanted: they need an explicit media/generation contract.
+    /// Position-addressed streams share immutable media caches across document/history snapshots.
+    /// Their timeline mapping is prepared anew; no old sequential cursor is transplanted.
     pub fn inherit_state(&mut self, previous: &Self, position: SamplePosition) {
         if self.config != previous.config {
             return;
         }
-        self.master_ramp = previous.master_ramp;
+        self.runtime.master_ramp = previous.runtime.master_ramp;
         for track in &mut self.tracks {
             if let Some(old) = previous.tracks.iter().find(|old| old.id == track.id) {
                 track.mix_ramp = old.mix_ramp;
@@ -498,8 +624,103 @@ impl AudioGraph {
         }
     }
 
-    /// Renders the prepared topology without allocation, locking, or I/O.
+    /// Cancel old target hints as well as leases. Normal completed blocks use
+    /// release_streaming so useful forward hints remain queued.
+    pub fn cancel_streaming(&mut self) {
+        for group in &self.runtime.windows {
+            group.media.cancel_requests();
+        }
+        self.release_streaming();
+    }
+
+    /// Release admission leases before replacing a graph or canceling a waiting window.
+    /// Group media owners remain alive, so lease release cannot destroy a worker on audio.
+    pub fn release_streaming(&mut self) {
+        for group in &mut self.runtime.windows {
+            group.window = None;
+        }
+        self.runtime.key = None;
+    }
+
+    fn prepare_streaming(&mut self, transport: &Transport, frames: usize) -> StreamReadiness {
+        let snapshot = transport.snapshot();
+        let key = StreamWindowKey {
+            position: snapshot.current_sample,
+            loop_range: snapshot.loop_range,
+            frames,
+        };
+        if self.runtime.key != Some(key) {
+            self.release_streaming();
+            for group in &mut self.runtime.windows {
+                group.window = Some(group.media.window());
+            }
+            self.runtime.key = Some(key);
+            for track in &self.tracks {
+                for clip in &track.streamed_clips {
+                    let group = self
+                        .runtime
+                        .windows
+                        .iter_mut()
+                        .find(|group| Arc::ptr_eq(&group.media, &clip.media))
+                        .expect("prepared media group exists");
+                    let window = group.window.as_mut().expect("window initialized above");
+                    for offset in 0..frames {
+                        if let Some(source) =
+                            clip.source_frame_at(transport.sample_at_offset(offset))
+                        {
+                            window.require_frame(source);
+                        }
+                    }
+                }
+            }
+        }
+        let mut result = StreamReadiness::ready();
+        for group in &mut self.runtime.windows {
+            result.include(
+                group
+                    .window
+                    .as_mut()
+                    .expect("window initialized above")
+                    .poll(),
+            );
+        }
+        if matches!(
+            result.state,
+            StreamReadinessState::Failed | StreamReadinessState::CapacityExceeded
+        ) {
+            self.release_streaming();
+        }
+        result
+    }
+
+    /// Compatibility entry point. Engine callers use the admission result before advancing Transport.
     pub fn process(&mut self, output: &mut [f32], transport: &Transport) {
+        self.process_with_readiness(output, transport);
+    }
+
+    /// All required stream pages are retained for the complete block before any source/ramp advances.
+    /// Waiting emits silence and retains partial leases; changing the target releases that window.
+    pub fn process_with_readiness(
+        &mut self,
+        output: &mut [f32],
+        transport: &Transport,
+    ) -> StreamReadiness {
+        output.fill(0.0);
+        let frames = output.len() / usize::from(self.config.channels);
+        if !transport.snapshot().playing || frames == 0 {
+            self.release_streaming();
+            return StreamReadiness::default();
+        }
+        let readiness = self.prepare_streaming(transport, frames);
+        if readiness.state == StreamReadinessState::Ready {
+            self.process_admitted(output, transport);
+            self.release_streaming();
+        }
+        readiness
+    }
+
+    /// Renders the admitted topology without allocation, locking, or I/O.
+    fn process_admitted(&mut self, output: &mut [f32], transport: &Transport) {
         output.fill(0.0);
         if !transport.snapshot().playing {
             return;
@@ -513,7 +734,8 @@ impl AudioGraph {
             .saturating_mul(channels);
         let any_solo = self.tracks.iter().any(|track| track.solo);
         let ramp_length = ramp_samples(self.config.sample_rate);
-        self.master_ramp
+        self.runtime
+            .master_ramp
             .retarget([self.master_gain; 3], ramp_length);
         for track in &mut self.tracks {
             if !track.mix_ramp.initialized {
@@ -525,6 +747,13 @@ impl AudioGraph {
         let mut rendered_frames = 0;
         for block in output.chunks_mut(maximum_samples) {
             for track in &mut self.tracks {
+                track.render_streams(
+                    block.len(),
+                    transport,
+                    rendered_frames,
+                    channels,
+                    &self.runtime.windows,
+                );
                 track.read_realtime_source(block.len());
                 track.render_timeline_source(block.len(), transport, rendered_frames);
             }
@@ -553,13 +782,16 @@ impl AudioGraph {
                             0.0
                         };
                         let coefficient = track.mix_ramp.current[channel.min(2)];
-                        *sample += track.sample_at(position, channel) * coefficient
-                            + generated * coefficient;
+                        // Keep PCM summation/multiplication order identical whether
+                        // clips are resident or streamed, including mixed MIDI tracks.
+                        let pcm =
+                            track.sample_at(position, channel) + track.stream_scratch[sample_index];
+                        *sample += pcm * coefficient + generated * coefficient;
                     }
                 }
-                self.master_ramp.advance();
+                self.runtime.master_ramp.advance();
                 for sample in frame {
-                    let mastered = *sample * self.master_ramp.current[0];
+                    let mastered = *sample * self.runtime.master_ramp.current[0];
                     *sample = if mastered.is_nan() {
                         0.0
                     } else {
