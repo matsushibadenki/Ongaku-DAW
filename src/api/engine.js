@@ -15,6 +15,8 @@ import { applyNoteSelection } from "../utils/midi.js";
 /** @typedef {{name: string, sampleRate: number, tempoBpm: number, timeSignature: {numerator: number, denominator: number}, lengthSamples: number, tracks: ProjectTrack[]}} ProjectSnapshot */
 /** @typedef {{currentSample: number, sampleRate: number, tempoBpm: number, timeSignature: {numerator: number, denominator: number}, playing: boolean, recording: boolean, loopRange: null|{start: number, end: number}}} TransportSnapshot */
 
+const validTransportAcceptance = (value) => Number.isSafeInteger(value?.engineEpoch) && value.engineEpoch >= 0 && Number.isSafeInteger(value?.commandId) && value.commandId > 0;
+
 const isDesktop = () => typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
 async function invoke(command, args) {
@@ -161,7 +163,9 @@ async function previewDocumentInvoke(command, args) {
 
 function previewInvoke(command, args = {}) {
   switch (command) {
-    case "get_graph_publication_status": return Promise.resolve({ documentRevision: 0, requestedRevision: null, engineEpoch: 0, engine: null, preparation: null, streamReadiness: null });
+    case "get_transport_command_status": return Promise.resolve(null);
+    case "cancel_transport_command": return Promise.resolve(false);
+    case "get_graph_publication_status": return Promise.resolve({ documentRevision: 0, requestedRevision: null, engineEpoch: 0, engine: null, preparation: null, streamReadiness: null, transportCommands: null });
     case "list_output_devices": return Promise.resolve([{ id: "preview", name: "Preview Output", isDefault: true }]);
     case "default_output_config": return Promise.resolve({ sampleRate: 48_000, channels: 2, bufferSize: 128 });
     case "configure_project":
@@ -171,12 +175,12 @@ function previewInvoke(command, args = {}) {
     case "get_project_snapshot": return Promise.resolve(preview.project);
     case "start_engine": preview.running = true; return Promise.resolve();
     case "stop_engine": preview.running = false; preview.transport.playing = false; return Promise.resolve();
-    case "play_transport": preview.transport.playing = true; return Promise.resolve();
-    case "pause_transport": preview.transport.playing = false; return Promise.resolve();
-    case "seek_transport": preview.transport.currentSample = args.sample; return Promise.resolve();
+    case "play_transport": preview.transport.playing = true; return Promise.resolve(null);
+    case "pause_transport": preview.transport.playing = false; return Promise.resolve(null);
+    case "seek_transport": preview.transport.currentSample = args.sample; return Promise.resolve(null);
     case "set_transport_loop":
       preview.transport.loopRange = args.enabled ? { start: args.startSample, end: args.endSample } : null;
-      return Promise.resolve();
+      return Promise.resolve(null);
     case "set_mixer_event":
     case "remove_mixer_event": {
       const track = preview.project.tracks.find((track) => track.id === args.trackId);
@@ -329,6 +333,12 @@ export const engineApi = {
   addMidiClip: (trackId, start, durationSamples) => invoke("add_midi_clip", { trackId, start, durationSamples }),
   editMidiSelection: (trackId, clipId, noteIds, edit) => invoke("edit_midi_selection", { trackId, clipId, noteIds, edit }),
   writeMidiNote: (trackId, clipId, noteId, start, durationSamples, key) => invoke("write_midi_note", { trackId, clipId, noteId, start, durationSamples, key }),
+  transportCommandStatus: (acceptance) => validTransportAcceptance(acceptance)
+    ? invoke("get_transport_command_status", { engineEpoch: acceptance.engineEpoch, commandId: acceptance.commandId })
+    : Promise.reject(new Error("Transport acceptance requires a safe epoch and positive command ID")),
+  cancelTransportCommand: (acceptance) => validTransportAcceptance(acceptance)
+    ? invoke("cancel_transport_command", { engineEpoch: acceptance.engineEpoch, commandId: acceptance.commandId })
+    : Promise.reject(new Error("Transport acceptance requires a safe epoch and positive command ID")),
   publicationStatus: (afterRevision = 0) => Number.isSafeInteger(afterRevision) && afterRevision >= 0
     ? invoke("get_graph_publication_status", { afterRevision })
     : Promise.reject(new Error("Publication revision must be a safe nonnegative integer")),

@@ -196,17 +196,24 @@ fn get_transport_snapshot(
 }
 
 #[tauri::command]
-fn play_transport(state: State<'_, ApplicationState>) -> Result<(), String> {
+fn play_transport(
+    state: State<'_, ApplicationState>,
+) -> Result<daw_app::TransportAcceptance, String> {
     send_transport(&state, TransportCommand::Play)
 }
 
 #[tauri::command]
-fn pause_transport(state: State<'_, ApplicationState>) -> Result<(), String> {
+fn pause_transport(
+    state: State<'_, ApplicationState>,
+) -> Result<daw_app::TransportAcceptance, String> {
     send_transport(&state, TransportCommand::Stop)
 }
 
 #[tauri::command]
-fn seek_transport(sample: u64, state: State<'_, ApplicationState>) -> Result<(), String> {
+fn seek_transport(
+    sample: u64,
+    state: State<'_, ApplicationState>,
+) -> Result<daw_app::TransportAcceptance, String> {
     send_transport(&state, TransportCommand::Seek(SamplePosition(sample)))
 }
 
@@ -216,7 +223,7 @@ fn set_transport_loop(
     start_sample: u64,
     end_sample: u64,
     state: State<'_, ApplicationState>,
-) -> Result<(), String> {
+) -> Result<daw_app::TransportAcceptance, String> {
     let range = enabled
         .then(|| SampleRange::new(SamplePosition(start_sample), SamplePosition(end_sample)))
         .flatten();
@@ -279,6 +286,33 @@ fn set_track_solo(
         .lock()
         .map_err(|_| "application state lock was poisoned".to_owned())?
         .set_track_solo(track_id, solo)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn get_transport_command_status(
+    engine_epoch: u64,
+    command_id: u64,
+    state: State<'_, ApplicationState>,
+) -> Result<daw_app::TransportCommandStatus, String> {
+    state
+        .application
+        .lock()
+        .map_err(|_| "application state lock was poisoned".to_owned())?
+        .transport_command_status(engine_epoch, command_id)
+        .map_err(|error| error.to_string())
+}
+#[tauri::command]
+fn cancel_transport_command(
+    engine_epoch: u64,
+    command_id: u64,
+    state: State<'_, ApplicationState>,
+) -> Result<bool, String> {
+    state
+        .application
+        .lock()
+        .map_err(|_| "application state lock was poisoned".to_owned())?
+        .cancel_transport_command(engine_epoch, command_id)
         .map_err(|error| error.to_string())
 }
 
@@ -465,12 +499,12 @@ fn set_automation_point_value(
 fn send_transport(
     state: &State<'_, ApplicationState>,
     command: TransportCommand,
-) -> Result<(), String> {
+) -> Result<daw_app::TransportAcceptance, String> {
     state
         .application
         .lock()
         .map_err(|_| "application state lock was poisoned".to_owned())?
-        .send_transport(command)
+        .submit_transport(command)
         .map_err(|error| error.to_string())
 }
 
@@ -513,6 +547,8 @@ pub fn run() {
             reorder_tracks,
             set_mixer_event,
             get_graph_publication_status,
+            get_transport_command_status,
+            cancel_transport_command,
             remove_mixer_event,
             edit_midi_clip,
             edit_midi_clips,

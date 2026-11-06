@@ -288,6 +288,16 @@ fn capacity_is_checked_for_the_union_of_shared_media_views_and_is_recoverable() 
         control.stream_readiness().unwrap().readiness.state,
         StreamReadinessState::CapacityExceeded
     );
+    assert_eq!(
+        control
+            .transport_protocol_status()
+            .latest
+            .unwrap()
+            .result
+            .unwrap()
+            .state,
+        TransportCommandState::CapacityExceeded
+    );
     assert_eq!(control.transport().current_sample, SamplePosition::ZERO);
     assert!(output.iter().all(|value| *value == 0.0));
     control
@@ -328,6 +338,16 @@ fn stop_cancels_a_pending_wait_and_faults_do_not_advance_the_timeline() {
         control.stream_readiness().unwrap().readiness.state,
         StreamReadinessState::Failed
     );
+    assert_eq!(
+        control
+            .transport_protocol_status()
+            .latest
+            .unwrap()
+            .result
+            .unwrap()
+            .state,
+        TransportCommandState::Failed
+    );
     assert_eq!(control.transport().current_sample, SamplePosition(40));
     assert!(output.iter().all(|value| *value == 0.0));
     // A failed inactive clip is not required by a window beyond its end.
@@ -340,4 +360,121 @@ fn stop_cancels_a_pending_wait_and_faults_do_not_advance_the_timeline() {
         StreamReadinessState::Ready
     );
     assert_eq!(control.transport().current_sample, SamplePosition(144));
+}
+
+#[test]
+#[allow(clippy::too_many_lines)] // One blocked-reader lifecycle spans acceptance, publication, cancellation and exact resume.
+fn accepted_seek_ids_follow_wait_cancel_supersede_and_ready_across_graph_adoption() {
+    let (media, gate, started) = fixture(false);
+    let (mut actual, control) = EngineProcessor::prepare(config()).unwrap();
+    control.submit_graph(graph(&media, false, 1.0)).unwrap();
+    let play = control.submit_transport(TransportCommand::Play).unwrap();
+    let seek = control
+        .submit_transport(TransportCommand::Seek(SamplePosition(40)))
+        .unwrap();
+    let mut output = [0.0; 8];
+    render(&mut actual, &mut output);
+    started.recv_timeout(Duration::from_secs(5)).unwrap();
+    let waiting = control
+        .transport_command_status(seek)
+        .unwrap()
+        .result
+        .unwrap();
+    assert_eq!(waiting.state, TransportCommandState::Waiting);
+    assert!(waiting.effect_applied);
+    assert_eq!(waiting.applied_sample, Some(SamplePosition(40)));
+    assert_eq!(waiting.resolved_sample, None);
+    assert_eq!(
+        control
+            .transport_command_status(play)
+            .unwrap()
+            .result
+            .unwrap()
+            .cancel_reason,
+        Some(TransportCancelReason::Superseded)
+    );
+    let adopted = control
+        .submit_graph_revision(graph(&media, false, 0.25), 9, None)
+        .unwrap();
+    render(&mut actual, &mut output);
+    assert_eq!(
+        control
+            .transport_command_status(seek)
+            .unwrap()
+            .result
+            .unwrap()
+            .graph_revision,
+        adopted
+    );
+    assert_eq!(
+        control.stream_readiness().unwrap().transport_command_id,
+        seek
+    );
+    assert!(control.cancel_transport_command(seek).unwrap());
+    render(&mut actual, &mut output);
+    let canceled = control
+        .transport_command_status(seek)
+        .unwrap()
+        .result
+        .unwrap();
+    assert_eq!(canceled.state, TransportCommandState::Canceled);
+    assert_eq!(
+        canceled.cancel_reason,
+        Some(TransportCancelReason::Explicit)
+    );
+    assert!(canceled.effect_applied);
+    assert!(!control.transport().playing);
+    assert_eq!(control.transport().current_sample, SamplePosition(40));
+    let newer_play = control.submit_transport(TransportCommand::Play).unwrap();
+    let newer_seek = control
+        .submit_transport(TransportCommand::Seek(SamplePosition(80)))
+        .unwrap();
+    render(&mut actual, &mut output);
+    assert_eq!(
+        control
+            .transport_command_status(newer_play)
+            .unwrap()
+            .result
+            .unwrap()
+            .cancel_reason,
+        Some(TransportCancelReason::Superseded)
+    );
+    assert_eq!(
+        control
+            .transport_command_status(newer_seek)
+            .unwrap()
+            .result
+            .unwrap()
+            .state,
+        TransportCommandState::Waiting
+    );
+    gate.release();
+    wait(|| {
+        render(&mut actual, &mut output);
+        control
+            .transport_command_status(newer_seek)
+            .unwrap()
+            .result
+            .unwrap()
+            .state
+            == TransportCommandState::Applied
+    });
+    let ready = control
+        .transport_command_status(newer_seek)
+        .unwrap()
+        .result
+        .unwrap();
+    assert_eq!(ready.resolved_sample, Some(SamplePosition(80)));
+    assert_eq!(ready.graph_revision, adopted);
+    assert_eq!(ready.readiness.state, StreamReadinessState::Ready);
+    assert_eq!(control.transport().current_sample, SamplePosition(84));
+    assert!(!control.cancel_transport_command(newer_seek).unwrap());
+    assert_eq!(
+        control
+            .transport_command_status(seek)
+            .unwrap()
+            .result
+            .unwrap(),
+        canceled
+    );
 }

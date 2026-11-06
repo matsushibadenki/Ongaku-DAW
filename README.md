@@ -10,8 +10,8 @@ See the [detailed roadmap](ROADMAP.md) for implementation status, priorities, fe
 
 ## Implemented functionality
 
-- **Audio foundation:** independent Rust engine; backend abstraction; CPAL output and a mock backend; prepared graphs; bounded graph/transport queues; off-callback graph reclamation; epoch-scoped graph resolution receipts, latest-wins pending snapshot coalescing, cancelable single-worker graph preparation, and scheduled-edit deadline warnings.
-- **Transport:** integer sample positions, play/pause, seek, loop ranges, tempo and time-signature state; complete-window stream readiness holds musical time safely during cold reads. Recording state exists in the model; audio capture is not implemented.
+- **Audio foundation:** independent Rust engine; backend abstraction; CPAL output and a mock backend; prepared graphs; bounded graph/transport queues; off-callback graph reclamation; epoch-scoped graph resolution receipts, latest-wins pending snapshot coalescing, cancelable single-worker graph preparation, scheduled-edit deadline warnings, and epoch-scoped Transport acceptance IDs with readiness/cancellation results.
+- **Transport:** integer sample positions, play/pause, seek, loop ranges, tempo and time-signature state; complete-window stream readiness holds musical time safely during cold reads. Accepted command IDs distinguish queued, waiting, applied and canceled results, with explicit post-mutation cancellation semantics. Recording state exists in the model; audio capture is not implemented.
 - **Audio sources:** immutable PCM assets, non-destructive audio clip ranges, background WAV decoding, bounded read-ahead streaming, project-integrated file-backed timeline caches shared across edits/Undo/Redo, and min/max/RMS waveform analysis. These building blocks are not yet a complete audio-import/recording editor.
 - **Mixing:** track gain, pan, mute/solo, master gain, timeline-aligned audio rendering, and persistent sample-position Gain/Pan/Mute/Solo events through the native editing API. Reusable mixer controls are integrated into the arrangement and inspector.
 - **MIDI:** sample-position scheduling and a small reference instrument; note creation, movement, resizing, transposition, velocity edits, selection/marquee selection, deletion, and grid quantization.
@@ -96,6 +96,7 @@ cargo test --workspace
 cargo clippy --workspace --all-targets
 npm run test:midi
 npm run test:mixer
+npm run test:transport
 npm run build
 ```
 
@@ -135,6 +136,7 @@ The current Clippy run reports existing warnings. A warning-clean release baseli
 - [Cancelable background graph preparation](docs/GRAPH_PREPARATION.md): request IDs, history/persistence semantics, cancellation checkpoints, bounded retry and failure handling.
 - [Graph adoption and deadline protocol](docs/GRAPH_PUBLICATION.md): accepted/adopted revisions, history mapping, bounded receipts, and timing notices.
 - [Sample-position mixer event API](docs/MIXER_EVENTS.md): scheduling, history, loop/seek behavior, and file compatibility.
+- [Transport command IDs and results](docs/TRANSPORT_COMMANDS.md): accepted IDs, epoch checks, readiness/cancellation, Stop priority and bounded history.
 - [Stream readiness and safe transport admission](docs/STREAMING_READINESS.md): retained windows, waiting policy, graph/history consistency and observable receipts.
 - [Streaming handoff contract](docs/STREAMING_VALIDATION.md): seek generations, complete-frame delivery, project timeline integration, shared history caches, frame integrity and remaining readiness/resource work.
 - [P0 validation record](docs/P0_VALIDATION.md): playback fixes, regression evidence, and remaining qualification gaps.

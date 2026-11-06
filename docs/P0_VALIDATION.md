@@ -211,3 +211,94 @@ Final verification: **136 tests pass in each of Debug and Release**, including 1
 🟠 [Next] Readiness acknowledgements/admission for scheduled cold seeks, large-loop prefetch, multi-stream resource/fairness budgets, interruptible I/O and automatic recovery. Full document PCM remains resident and is also spooled to temporary backing; import/storage that avoids that duplication is separate work. A retained document/history keeps idle media workers available. Worker faults currently require reopening the project for fresh media preparation.
 
 ⭕️ [Pending] Physical storage and device stalls, loopback/listening, measured atomic-cache overhead, cross-platform file lifecycle and endurance qualification. Warm-fixture PCM equality does not guarantee gap-free arbitrary cold seeks or playback under overload. See the [streaming contract](STREAMING_VALIDATION.md).
+
+## Tenth batch — readiness receipts and safe seek/loop admission
+
+Date: 2026-11-06. Scope: native project timeline streaming; independently implemented without reading or reusing Pro-Wave code/assets. See the [readiness contract](STREAMING_READINESS.md).
+
+🟢 [Done] Before rendering, the graph collects the unique required-page union per immutable media across all tracks/views and retains the complete callback window. Unavailable data silences the whole callback and holds musical Transport, MIDI, automation and all mixer/master ramps. Partial leases survive loading polls. Capacity overflow and required-worker failure have explicit distinct results, and inactive failed clips do not block unrelated ranges. Ready results render once at the held position and advance by exactly the admitted frame count.
+
+🟢 [Done] Atomic leases fence eviction for an admitted window. A fully retained cache keeps decoded scratch off audio rather than repeating disk I/O. Changed targets cancel unstarted old hints/demands; an already executing read can finish at its original source address. Loop-aware lookahead avoids loading unrelated pages past a short loop. Adoption releases previous waiting leases before retirement; canceled graphs preserve the current wait. New graphs and actual Undo/Redo re-evaluate readiness while sharing immutable media. Resident and streamed PCM now use identical mixing order with MIDI.
+
+🟢 [Done] Fixed atomic last-callback receipts expose actual graph revision, applied transport generation, checked position, requested/rendered frames, required/ready pages and cumulative loading waits. Concurrent reader tests reject mixed snapshots. Native publication polling exposes the receipt; the compact status icon supports English/Japanese/Simplified Chinese, suppresses stale-graph receipts and makes no native-readiness claim in preview/stopped sessions. A ready receipt confirms a completed output window, not guaranteed residency of future windows.
+
+🟢 [Done] Final Rust 1.93.0 Debug and Release workspace suites each pass **145 tests**, including **23 streaming**, **35 engine**, **22 application** and **24 project** tests. Tests cover retained-page eviction, single-decode blocked publication, partial-window progress, union capacity across shared views/tracks, blocked old reads followed by new targets, canceled/adopted graphs with delayed retirement, Stop/fault/inactive-clip behavior, exact wait/resume PCM/MIDI/ramp references, and actual native history. Callback allocator instrumentation covers collection/poll/read/release, waiting, adoption, resume, failure, capacity and Stop with zero allocations/frees. `cargo fmt --all --check` and `cargo clippy --workspace --all-targets --offline` complete; only existing project/MIDI warnings remain.
+
+Native verification commands use the pinned-toolchain `PATH` from the eighth batch:
+
+```sh
+cargo fmt --all --check
+cargo test --workspace --offline
+cargo test --workspace --release --offline
+cargo clippy --workspace --all-targets --offline
+npm run test:mixer
+npm run test:midi
+npm run build
+```
+
+The two mixer API tests, one MIDI suite and production Vite build pass. Browser preview explicitly reports `streamReadiness: null`.
+
+### Status presentation QA
+
+Flow: `http://127.0.0.1:5175/` → start engine view with a synthetic native receipt → waiting/ready/failed/capacity transitions → stale graph suppression → language changes → stop hides readiness. Browser plugin not available (no Browser skill in the session); existing cached Playwright 1.60.0/Chromium was used without installing dependencies. Viewports: 1440×1000 and 390×844.
+
+| Check | Result |
+| --- | --- |
+| Page identity | Pass: localhost URL and Ongaku title. |
+| Meaningful content | Pass: Night Sketch workspace rendered. |
+| Framework overlay | Pass: no Vite error overlay. |
+| Console health | Pass: no page errors or error/warning messages. |
+| Screenshot/layout | Pass: desktop/mobile reviewed; status icon remains inside footer. |
+| Interaction | Pass: all four states, graph revision mismatch, EN/JA/简体中文 hover/accessibility text, Stop and preview exclusion. |
+
+Temporary fixture script/screenshots are outside the repository at `/tmp/readiness-ui.mjs`, `/tmp/readiness-desktop.png`, `/tmp/readiness-mobile.png`, `/tmp/readiness-status.png`. The fixture overrides served view metadata only; it does not qualify real native I/O or hardware timing.
+
+🟠 [Next] Enqueue-time command IDs, scheduled readiness/deadline admission, multiple-engine fairness and aggregate resource budgets, long-loop tuning, interruptible storage shutdown and automatic recovery. Leases/receipts and pending transport work remain runtime-only; project format versions 1/2 are unchanged.
+
+⭕️ [Pending] Real storage/device faults, throughput and atomic-cache overhead, listening/click tests, hardware loopback and endurance qualification. Holding musical time inserts wall-clock silence and is not a claim of uninterrupted cold-seek playback.
+
+## Eleventh batch — accepted Transport IDs and observable results
+
+Date: 2026-11-06. Independently implemented without reading/reusing Pro-Wave code or assets. The [Transport contract](TRANSPORT_COMMANDS.md) defines acceptance, cancellation, output readiness, retention and engine epochs.
+
+🟢 [Done] Every accepted Transport command receives a JSON-safe monotonic ID. Native application/Tauri actions return `{ engineEpoch, commandId }`; per-ID status/cancel APIs validate that epoch. Invalid commands, normal queue saturation and early restart after Stop do not consume normal IDs. Queued cancellation skips mutation; active-wait cancellation does not undo already changed state. Status distinguishes accepted/pending/waiting/applied/cancel-pending/canceled/failure/capacity, with explicit effect flags and positions. New output intents supersede older unfinished waits; terminal results stay immutable while retained.
+
+🟢 [Done] Stop bypasses the normal producer lock and full queue. Coalesced/delayed Stop producers settle correctly, stale starts are canceled, and queued clock/seek/loop policy is preserved. IDs never wrap; exhaustion still latches a safety Stop while reporting failed acceptance. Fixed 256-slot receipt storage protects writers from slot reuse and exposes retention gaps/update contention without inventing a successful outcome. Control snapshots use bounded coherent atomic reads; callback results and cancellation have one linearization winner.
+
+🟢 [Done] Pending IDs survive actual graph replacement and native Undo/Redo. Readiness is rechecked against the adopted graph, with ID/graph/generation correlation and exact PCM output after waiting. History changes do not allocate Transport IDs. Restart rejects old epoch/ID pairs even when the new session reuses the numeric ID. Zero-frame callbacks leave playing requests pending rather than falsely completing readiness. Project file versions 1/2 and history contents remain unchanged; receipts are runtime-only.
+
+🟢 [Done] Rust 1.93.0 Debug and Release workspace suites each pass **155 tests**, including **44 engine**, **23 application**, **24 project** and **23 streaming** tests. New/exercised cases include queued and active cancellation, delayed Stop producers, protected receipt wraparound, Stop under queue/receipt pressure, cancellation/application races, same-state snapshot coherence, validation/ID exhaustion, zero-frame callbacks, loading/failure/capacity results, blocked graph adoption, actual history and stale epochs. Allocation/free instrumentation observes zero callback allocations/frees across those paths. Formatting and Clippy complete with only the existing project/MIDI warnings.
+
+Commands (using the pinned-toolchain PATH documented above):
+
+```sh
+cargo fmt --all --check
+cargo test --workspace --offline
+cargo test --workspace --release --offline
+cargo clippy --workspace --all-targets --offline
+npm run test:transport
+npm run test:mixer
+npm run test:midi
+npm run build
+```
+
+Two Transport tests, two mixer API tests, the MIDI suite and production Vite build pass. JavaScript tests cover epoch/ID validation, preview null receipts, ID-correlated hover labels, cancellation-after-effect text and unavailable results.
+
+### Transport result presentation QA
+
+Flow: local app → engine view with synthetic native result → accepted/pending/waiting/applied/cancel-pending/canceled/failure/capacity hover text → mismatched ID suppressed → unavailable receipt → EN/JA/简体中文 → stopped/preview exclusion. Browser plugin not available (no Browser skill in session); preinstalled Playwright 1.60.0/Chromium used without installing dependencies. Environment: `http://127.0.0.1:5175/`, 1440×1000 and 390×844.
+
+| Check | Result |
+| --- | --- |
+| Page identity | Pass: expected localhost and Ongaku title. |
+| Nonblank screen | Pass: Night Sketch workspace rendered. |
+| Framework overlay | Pass: none. |
+| Console health | Pass: no page/console errors or warnings. |
+| Screenshot/layout | Pass: desktop/mobile reviewed; existing footer layout retained. |
+| Interaction | Pass: all lifecycle states, ID mismatch, retention loss, three languages, stopped and preview behavior. |
+
+Temporary artifacts remain outside the repository: `/tmp/transport-ui.mjs`, `/tmp/transport-desktop.png`, `/tmp/transport-mobile.png`, `/tmp/transport-status.png`. The served-view fixture qualifies presentation only; Rust regressions qualify software protocol behavior, and neither qualifies physical audio latency.
+
+🟠 [Next] Scheduled deadline admission, atomic command batches, exportable/durable audit history, shutdown outcomes beyond the current engine, controller/panic coverage, multi-stream fairness, interruptible I/O and automatic recovery. A terminal command result is its first resolution, not a guarantee that later playback windows remain ready.
+
+⭕️ [Pending] Hardware/driver timing, listening, real storage/device faults, measured receipt-contention/overload latency and endurance qualification. No comparative DAW performance or sample-timed future execution claim is made.

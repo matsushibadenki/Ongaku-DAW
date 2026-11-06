@@ -258,8 +258,8 @@ fn readiness_wait_survives_native_undo_redo_without_false_adoption_or_timeline_p
     reference.process(&mut expected, &transport);
     transport.advance(128);
     assert_eq!(output.map(f32::to_bits), expected.map(f32::to_bits));
-    control
-        .send_transport(TransportCommand::Seek(SamplePosition(20_001)))
+    let accepted_seek = control
+        .submit_transport(TransportCommand::Seek(SamplePosition(20_001)))
         .unwrap();
     actual.process_block(&mut output);
     app.active_config = Some(config);
@@ -285,6 +285,19 @@ fn readiness_wait_survives_native_undo_redo_without_false_adoption_or_timeline_p
         actual.process_block(&mut output);
         let status = app.service_publications(0).unwrap();
         let admission = status.stream_readiness.unwrap();
+        assert_eq!(admission.transport_command_id, accepted_seek);
+        let command = app
+            .transport_command_status(app.engine_epoch, accepted_seek)
+            .unwrap()
+            .result
+            .unwrap();
+        assert_eq!(command.state, audio_engine::TransportCommandState::Waiting);
+        assert_eq!(command.graph_revision, admission.graph_revision);
+        assert_eq!(command.applied_sample, Some(SamplePosition(20_001)));
+        assert_eq!(
+            status.transport_commands.unwrap().accepted_id,
+            accepted_seek
+        );
         assert_eq!(
             admission.graph_revision,
             status.engine.unwrap().adopted_revision
@@ -331,10 +344,60 @@ fn readiness_wait_survives_native_undo_redo_without_false_adoption_or_timeline_p
     reference.process(&mut expected, &transport);
     assert_eq!(output.map(f32::to_bits), expected.map(f32::to_bits));
     let admission = app.publication_status(0).stream_readiness.unwrap();
+    let command = app
+        .transport_command_status(app.engine_epoch, accepted_seek)
+        .unwrap()
+        .result
+        .unwrap();
+    assert_eq!(command.state, audio_engine::TransportCommandState::Applied);
+    assert_eq!(command.graph_revision, admission.graph_revision);
+    assert_eq!(command.resolved_sample, Some(SamplePosition(20_001)));
     assert_eq!(admission.rendered_frames, 128);
     assert!(admission.waiting_callbacks >= 7);
     assert_eq!(
         app.transport().unwrap().current_sample,
         SamplePosition(20_129)
     );
+}
+
+#[test]
+fn stale_transport_acceptances_cannot_control_a_restarted_engine() {
+    let backend = audio_backend::mock::MockAudioBackend::default();
+    let config = AudioConfig {
+        sample_rate: 8000,
+        ..AudioConfig::DEFAULT
+    };
+    let mut app = DawApplication::with_sample_rate(8000).unwrap();
+    app.start(&backend, None, config).unwrap();
+    let first = app
+        .submit_transport(TransportCommand::Seek(SamplePosition(100)))
+        .unwrap();
+    assert!(
+        app.transport_command_status(first.engine_epoch, first.command_id)
+            .is_ok()
+    );
+    app.stop().unwrap();
+    assert!(
+        app.transport_command_status(first.engine_epoch, first.command_id)
+            .is_err()
+    );
+    app.start(&backend, None, config).unwrap();
+    let second = app
+        .submit_transport(TransportCommand::Seek(SamplePosition(200)))
+        .unwrap();
+    assert_eq!(first.command_id, second.command_id);
+    assert!(second.engine_epoch > first.engine_epoch);
+    assert!(
+        app.transport_command_status(first.engine_epoch, first.command_id)
+            .is_err()
+    );
+    assert!(
+        app.cancel_transport_command(first.engine_epoch, first.command_id)
+            .is_err()
+    );
+    assert!(
+        app.transport_command_status(second.engine_epoch, second.command_id)
+            .is_ok()
+    );
+    app.stop().unwrap();
 }

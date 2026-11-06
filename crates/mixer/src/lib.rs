@@ -625,7 +625,7 @@ impl AudioGraph {
     }
 
     /// Cancel old target hints as well as leases. Normal completed blocks use
-    /// release_streaming so useful forward hints remain queued.
+    /// `release_streaming` so useful forward hints remain queued.
     pub fn cancel_streaming(&mut self) {
         for group in &self.runtime.windows {
             group.media.cancel_requests();

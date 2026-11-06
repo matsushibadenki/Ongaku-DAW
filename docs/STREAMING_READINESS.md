@@ -30,9 +30,11 @@ A ready window reads only retained pages. A worker fault racing after admission 
 | `failed` | A required media worker has a terminal fault. | Release leases, silence and hold Transport. |
 | `capacityExceeded` | The unique required-page union exceeds one media cache. | Release leases, silence and hold Transport; do not present this as ordinary loading. |
 
+`pageReads` in media diagnostics counts successful cache page publications; waiting receipts separately describe retained pages.
+
 `requiredPages` is a lower bound when capacity is exceeded (capacity plus at least one). An inactive failed clip does not block an unrelated window beyond its timeline interval. Muted streamed tracks are conservatively included so unmute/solo changes do not silently change readiness policy.
 
-Stop cancels a wait through the existing out-of-band barrier. A new seek or loop range/output size replaces the old requirements. A valid new target/graph can recover from a capacity result. A failed worker currently requires fresh media preparation, normally by reopening the project; automatic recovery and interruptible blocking I/O remain open.
+Stop cancels a wait through the existing out-of-band barrier. A new seek or loop range/output size replaces the old requirements. Native discontinuities/adoption cancel unstarted obsolete hints and demands; already executing I/O may finish at its original source address. A valid new target/graph can recover from a capacity result. A failed worker currently requires fresh media preparation, normally by reopening the project; automatic recovery and interruptible blocking I/O remain open.
 
 ## Graph, history and file semantics
 
@@ -48,6 +50,7 @@ Document/history clones retain immutable media/cache identity through edits and 
 
 ```text
 graphRevision        actual adopted graph, in the enclosing engineEpoch
+transportCommandId   accepted ID owning the current output context (zero before one exists)
 transportGeneration  diagnostic generation of applied transport commands/Stop barriers
 position             start of the checked musical window
 requestedFrames      complete output frames requested
@@ -56,9 +59,9 @@ waitingCallbacks     cumulative callbacks held specifically for loading
 readiness            { state, requiredPages, readyPages }
 ```
 
-The generation is not an enqueue-time command ID. `send_transport` still acknowledges queue acceptance; it does not synchronously acknowledge page readiness. Receipt fields use fixed atomic storage and a coherent, bounded control-side snapshot. Publication status components can be sampled across adjacent callbacks; the UI suppresses a receipt whose graph revision differs from the sampled adopted revision.
+The generation is not an enqueue-time command ID. Accepted IDs are now available through `submit_transport` and the native APIs; see the [Transport command contract](TRANSPORT_COMMANDS.md). The compatibility `send_transport` method discards the returned ID; acceptance still does not synchronously acknowledge page readiness. Receipt fields use fixed atomic storage and a coherent, bounded control-side snapshot. Publication status components can be sampled across adjacent callbacks; the UI suppresses a receipt whose graph revision differs from the sampled adopted revision.
 
-A ready receipt confirms the window that just rendered. Its leases have been released; it does not promise that later ranges or an entire large loop will remain resident. General command IDs/cancellation receipts, scheduled deadline admission and advance readiness promises remain future work.
+A ready receipt confirms the window that just rendered. Its leases have been released; it does not promise that later ranges or an entire large loop will remain resident. Command IDs and cancellation receipts are implemented in the eleventh batch. Scheduled deadline admission and advance readiness promises remain future work.
 
 The status-bar icon exposes ready/loading/failure/capacity states with English, Japanese and Simplified Chinese hover/accessibility text. Stopped and browser-preview sessions make no native readiness claim.
 
@@ -68,5 +71,5 @@ Software regressions cover retained-page eviction, blocked publication without r
 
 Allocator instrumentation covers window collection/poll/read/release and complete engine callbacks during waiting, adoption, resume, faults, capacity and Stop. It observes zero allocations and frees in those paths. See [P0 validation](P0_VALIDATION.md) for final counts and commands.
 
-- 🟠 [Next] Scheduled readiness/deadline admission, command request IDs, multi-stream/engine fairness and budgets, long-loop prefetch tuning, interruptible storage I/O, bounded shutdown and automatic recovery.
+- 🟠 [Next] Scheduled readiness/deadline admission, atomic command batches, multi-stream/engine fairness and budgets, long-loop prefetch tuning, interruptible storage I/O, bounded shutdown and automatic recovery.
 - ⭕️ [Pending] Physical storage/device stalls, listening/click qualification, measured atomic-cache throughput, hardware loopback and long-session endurance. Browser fixtures qualify status presentation only, not native timing.

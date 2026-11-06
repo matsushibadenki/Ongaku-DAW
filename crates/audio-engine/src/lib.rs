@@ -6,6 +6,12 @@ mod readiness;
 mod readiness_tests;
 use readiness::ReadinessReceipt;
 pub use readiness::StreamReadinessSnapshot;
+mod transport_protocol;
+use transport_protocol::TransportReceipts;
+pub use transport_protocol::{
+    TRANSPORT_HISTORY_CAPACITY, TransportCancelReason, TransportCommandKind,
+    TransportCommandResult, TransportCommandState, TransportCommandStatus, TransportProtocolStatus,
+};
 mod metrics;
 mod pending;
 mod publication;
@@ -48,7 +54,9 @@ pub const MAX_PUBLICATION_REVISION: u64 = (1_u64 << 53) - 1;
 const GRAPH_QUEUE_CAPACITY: usize = 4;
 const TRANSPORT_QUEUE_CAPACITY: usize = 64;
 
+#[derive(Clone, Copy)]
 struct TransportRequest {
+    id: u64,
     command: TransportCommand,
     stop_generation: u64,
 }
@@ -72,7 +80,19 @@ impl EngineGraph {
         Self::Timeline(graph)
     }
 
-    fn process(&mut self, output: &mut [f32], transport: &Transport) -> StreamReadiness {
+    fn process(
+        &mut self,
+        output: &mut [f32],
+        transport: &Transport,
+        frames: usize,
+    ) -> StreamReadiness {
+        if frames == 0 {
+            output.fill(0.0);
+            if let Self::Timeline(graph) = self {
+                graph.release_streaming();
+            }
+            return StreamReadiness::default();
+        }
         match self {
             Self::TestTone(graph) => {
                 graph.process(output);
@@ -111,6 +131,7 @@ struct SharedTransport {
     loop_start: AtomicU64,
     loop_end: AtomicU64,
     stop_requested: AtomicU64,
+    emergency_stop: AtomicBool,
     stop_applied: AtomicU64,
 }
 
@@ -130,6 +151,7 @@ impl SharedTransport {
             loop_start: AtomicU64::new(0),
             loop_end: AtomicU64::new(0),
             stop_requested: AtomicU64::new(0),
+            emergency_stop: AtomicBool::new(false),
             stop_applied: AtomicU64::new(0),
         }
     }
@@ -196,6 +218,7 @@ impl SharedTransport {
 pub struct EngineControl {
     gain_bits: Arc<AtomicU32>,
     readiness: Arc<ReadinessReceipt>,
+    transport_receipts: Arc<TransportReceipts>,
     metrics: Arc<RealtimeMetrics>,
     graph_updates: Arc<Mutex<GraphPublisher>>,
     publications: Arc<PublicationReceipts>,
@@ -349,13 +372,33 @@ impl EngineControl {
         self.publications.status(after_revision)
     }
 
-    /// Stop is an out-of-band barrier, independent of queue capacity and producer locks.
-    /// Play/record requests during an unacknowledged stop are rejected for explicit retry.
+    /// Compatibility entry point. Use `submit_transport` to retain the accepted ID.
     pub fn send_transport(&self, command: TransportCommand) -> Result<(), AudioError> {
+        self.submit_transport(command).map(|_| ())
+    }
+
+    /// Stop remains out of band and never takes the normal producer mutex.
+    pub fn submit_transport(&self, command: TransportCommand) -> Result<u64, AudioError> {
+        transport_protocol::validate(command)?;
         if command == TransportCommand::Stop {
-            self.transport.stop_requested.fetch_add(1, Ordering::AcqRel);
-            return Ok(());
+            let id = self.transport_receipts.accept(command).map_err(|_| {
+                self.transport.emergency_stop.store(true, Ordering::Release);
+                AudioError::InvalidState(
+                    "transport IDs exhausted; safety Stop requested; restart the engine",
+                )
+            })?;
+            self.transport
+                .stop_requested
+                .fetch_max(id, Ordering::AcqRel);
+            self.transport_receipts
+                .stop_dirty
+                .store(true, Ordering::SeqCst);
+            return Ok(id);
         }
+        let mut producer = self
+            .transport_commands
+            .lock()
+            .map_err(|_| AudioError::InvalidState("transport command lock was poisoned"))?;
         let stop_generation = self.transport.stop_requested.load(Ordering::Acquire);
         if matches!(
             command,
@@ -366,14 +409,43 @@ impl EngineControl {
                 "stop is pending; retry playback after acknowledgement",
             ));
         }
-        self.transport_commands
-            .lock()
-            .map_err(|_| AudioError::InvalidState("transport command lock was poisoned"))?
+        if producer.slots() == 0 {
+            return Err(AudioError::Backend(
+                "transport command queue is full".into(),
+            ));
+        }
+        let id = self.transport_receipts.accept(command)?;
+        producer
             .push(TransportRequest {
+                id,
                 command,
                 stop_generation,
             })
-            .map_err(|_| AudioError::Backend("transport command queue is full".into()))
+            .map_err(|_| AudioError::Backend("transport queue publication failed".into()))?;
+        Ok(id)
+    }
+
+    pub fn cancel_transport_command(&self, id: u64) -> Result<bool, AudioError> {
+        self.validate_transport_id(id)?;
+        self.transport_receipts.cancel(id)
+    }
+    pub fn transport_command_status(&self, id: u64) -> Result<TransportCommandStatus, AudioError> {
+        self.validate_transport_id(id)?;
+        Ok(self.transport_receipts.status(id))
+    }
+    fn validate_transport_id(&self, id: u64) -> Result<(), AudioError> {
+        if id == 0 || id > self.transport_receipts.accepted.load(Ordering::SeqCst) {
+            Err(AudioError::InvalidConfig(
+                "transport ID was not accepted by this engine",
+            ))
+        } else {
+            Ok(())
+        }
+    }
+    #[must_use]
+    pub fn transport_protocol_status(&self) -> TransportProtocolStatus {
+        self.transport_receipts
+            .summary(self.transport.stop_applied.load(Ordering::Acquire))
     }
 
     /// Last completed callback's admission, keyed to its actual adopted graph and transport generation.
@@ -420,6 +492,9 @@ pub struct EngineProcessor {
     active_graph_revision: u64,
     transport_generation: u64,
     waiting_callbacks: u64,
+    transport_receipts: Arc<TransportReceipts>,
+    pending_transport: Option<u64>,
+    transport_context_id: u64,
 }
 
 impl EngineProcessor {
@@ -430,6 +505,7 @@ impl EngineProcessor {
         let gain_bits = Arc::new(AtomicU32::new(initial_gain.to_bits()));
         let metrics = Arc::new(RealtimeMetrics::new(config.callback_deadline_ns()));
         let readiness = Arc::new(ReadinessReceipt::default());
+        let transport_receipts = Arc::new(TransportReceipts::new());
         let mut graph = EngineGraph::test_tone(config);
         graph.set_test_tone_gain(initial_gain);
         let (graph_producer, graph_consumer) = RingBuffer::new(GRAPH_QUEUE_CAPACITY);
@@ -458,9 +534,13 @@ impl EngineProcessor {
             active_graph_revision: 0,
             transport_generation: 0,
             waiting_callbacks: 0,
+            transport_receipts: Arc::clone(&transport_receipts),
+            pending_transport: None,
+            transport_context_id: 0,
         };
         let control = EngineControl {
             gain_bits,
+            transport_receipts,
             readiness,
             metrics,
             graph_updates: Arc::new(Mutex::new(GraphPublisher {
@@ -486,22 +566,12 @@ impl EngineProcessor {
         let started = std::time::Instant::now();
         let previous_transport = self.transport.snapshot();
         self.apply_stop_barrier();
+        self.cancel_requested_wait();
         for _ in 0..TRANSPORT_QUEUE_CAPACITY {
             let Ok(request) = self.transport_commands.pop() else {
                 break;
             };
-            let starts_playback = matches!(
-                request.command,
-                TransportCommand::Play | TransportCommand::SetRecording(true)
-            );
-            if !starts_playback || request.stop_generation == self.applied_stop_generation {
-                // Tempo, meter, loop and seek updates are not discarded by a stop.
-                self.transport.apply(request.command);
-                self.transport_generation = self
-                    .transport_generation
-                    .saturating_add(1)
-                    .min(MAX_PUBLICATION_REVISION);
-            }
+            self.apply_transport_request(request);
         }
         // A stop arriving during command draining still wins before rendering this block.
         self.apply_stop_barrier();
@@ -520,9 +590,48 @@ impl EngineProcessor {
                 .set_test_tone_gain(f32::from_bits(requested_gain));
             self.applied_gain_bits = requested_gain;
         }
+        self.cancel_requested_wait();
+        let protocol = Arc::clone(&self.transport_receipts);
+        let mut admission = self.pending_transport.and_then(|id| protocol.begin(id));
+        if admission
+            .as_ref()
+            .is_some_and(|guard| guard.result.state == TransportCommandState::CancelPending)
+        {
+            self.transport.apply(TransportCommand::Stop);
+            self.transport_generation = self
+                .transport_generation
+                .saturating_add(1)
+                .min(MAX_PUBLICATION_REVISION);
+            self.graph.cancel_streaming();
+            if let Some(guard) = &mut admission {
+                Self::canceled(
+                    &mut guard.result,
+                    TransportCancelReason::Explicit,
+                    self.transport.snapshot().current_sample,
+                    self.active_graph_revision,
+                    self.transport_generation,
+                );
+            }
+            self.pending_transport = None;
+        }
         let position = self.transport.snapshot().current_sample;
-        let readiness = self.graph.process(output, &self.transport);
         let frames = output.len() / usize::from(self.config.channels);
+        let readiness = self.graph.process(output, &self.transport, frames);
+        if let Some(guard) = &mut admission {
+            if Self::settle_admission(
+                &mut guard.result,
+                readiness,
+                position,
+                self.active_graph_revision,
+                self.transport_generation,
+                self.transport.snapshot().playing.then_some(frames),
+            ) {
+                self.pending_transport = None;
+            }
+        } else if readiness.state != StreamReadinessState::Waiting {
+            self.pending_transport = None;
+        }
+        drop(admission);
         let rendered = if readiness.state == StreamReadinessState::Ready {
             frames
         } else {
@@ -535,6 +644,7 @@ impl EngineProcessor {
         // advanced behind a silent hole or reconstructed from late sequential PCM.
         self.transport.advance(rendered);
         self.readiness.publish(StreamReadinessSnapshot {
+            transport_command_id: self.transport_context_id,
             graph_revision: self.active_graph_revision,
             transport_generation: self.transport_generation,
             position,
@@ -551,15 +661,185 @@ impl EngineProcessor {
             .record_callback(started.elapsed(), frames, self.config.sample_rate);
     }
 
+    fn settle_admission(
+        result: &mut TransportCommandResult,
+        readiness: StreamReadiness,
+        position: daw_core::SamplePosition,
+        graph: u64,
+        generation: u64,
+        playing_frames: Option<usize>,
+    ) -> bool {
+        if !result.state.terminal() {
+            result.readiness = readiness;
+            result.graph_revision = graph;
+            result.transport_generation = generation;
+            // An empty callback must not acknowledge audio readiness for a playing
+            // context. It has not admitted or produced even one complete frame.
+            result.state = if playing_frames == Some(0) {
+                TransportCommandState::Pending
+            } else {
+                match readiness.state {
+                    StreamReadinessState::Waiting => TransportCommandState::Waiting,
+                    StreamReadinessState::Failed => TransportCommandState::Failed,
+                    StreamReadinessState::CapacityExceeded => {
+                        TransportCommandState::CapacityExceeded
+                    }
+                    StreamReadinessState::Ready | StreamReadinessState::Inactive => {
+                        TransportCommandState::Applied
+                    }
+                }
+            };
+            if result.state.terminal() {
+                result.resolved_sample = Some(position);
+            }
+        }
+        result.state.terminal()
+    }
+
+    fn canceled(
+        result: &mut TransportCommandResult,
+        reason: TransportCancelReason,
+        position: daw_core::SamplePosition,
+        graph: u64,
+        generation: u64,
+    ) {
+        result.state = TransportCommandState::Canceled;
+        result.readiness = StreamReadiness::default();
+        result.cancel_reason = Some(reason);
+        result.resolved_sample = Some(position);
+        result.graph_revision = graph;
+        result.transport_generation = generation;
+    }
+    fn resolve_pending(&mut self, reason: TransportCancelReason) {
+        if let Some(id) = self.pending_transport.take()
+            && let Some(mut guard) = self.transport_receipts.begin(id)
+        {
+            let reason = if guard.result.state == TransportCommandState::CancelPending {
+                TransportCancelReason::Explicit
+            } else {
+                reason
+            };
+            Self::canceled(
+                &mut guard.result,
+                reason,
+                self.transport.snapshot().current_sample,
+                self.active_graph_revision,
+                self.transport_generation,
+            );
+        }
+    }
+    fn cancel_requested_wait(&mut self) {
+        if let Some(id) = self.pending_transport {
+            let status = self.transport_receipts.status(id);
+            if status
+                .result
+                .is_some_and(|result| result.state == TransportCommandState::CancelPending)
+            {
+                self.transport.apply(TransportCommand::Stop);
+                self.transport_generation = self
+                    .transport_generation
+                    .saturating_add(1)
+                    .min(MAX_PUBLICATION_REVISION);
+                self.graph.cancel_streaming();
+                self.resolve_pending(TransportCancelReason::Explicit);
+            }
+        }
+    }
+    fn apply_transport_request(&mut self, request: TransportRequest) {
+        let protocol = Arc::clone(&self.transport_receipts);
+        let mut receipt = protocol.begin(request.id);
+        if receipt
+            .as_ref()
+            .is_some_and(|guard| guard.result.state == TransportCommandState::CancelPending)
+        {
+            if let Some(guard) = &mut receipt {
+                Self::canceled(
+                    &mut guard.result,
+                    TransportCancelReason::Explicit,
+                    self.transport.snapshot().current_sample,
+                    self.active_graph_revision,
+                    self.transport_generation,
+                );
+            }
+            return;
+        }
+        let starts = matches!(
+            request.command,
+            TransportCommand::Play | TransportCommand::SetRecording(true)
+        );
+        if starts && request.stop_generation != self.applied_stop_generation {
+            if let Some(guard) = &mut receipt {
+                Self::canceled(
+                    &mut guard.result,
+                    TransportCancelReason::Stopped,
+                    self.transport.snapshot().current_sample,
+                    self.active_graph_revision,
+                    self.transport_generation,
+                );
+            }
+            return;
+        }
+        let admission = matches!(
+            request.command,
+            TransportCommand::Play
+                | TransportCommand::Seek(_)
+                | TransportCommand::SetLoop(_)
+                | TransportCommand::SetRecording(true)
+        );
+        if admission {
+            self.resolve_pending(TransportCancelReason::Superseded);
+            self.transport_context_id = request.id;
+        }
+        self.transport.apply(request.command);
+        self.transport_generation = self
+            .transport_generation
+            .saturating_add(1)
+            .min(MAX_PUBLICATION_REVISION);
+        let position = self.transport.snapshot().current_sample;
+        if let Some(guard) = &mut receipt {
+            guard.result.effect_applied = true;
+            guard.result.applied_sample = Some(position);
+            guard.result.graph_revision = self.active_graph_revision;
+            guard.result.transport_generation = self.transport_generation;
+            guard.result.state = if admission && self.transport.snapshot().playing {
+                TransportCommandState::Pending
+            } else {
+                TransportCommandState::Applied
+            };
+            if guard.result.state == TransportCommandState::Applied {
+                guard.result.resolved_sample = Some(position);
+            }
+        }
+        if admission && self.transport.snapshot().playing {
+            self.pending_transport = Some(request.id);
+        }
+    }
+
     fn apply_stop_barrier(&mut self) {
+        let dirty = self
+            .transport_receipts
+            .stop_dirty
+            .swap(false, Ordering::SeqCst);
         let generation = self.shared_transport.stop_requested.load(Ordering::Acquire);
-        if generation != self.applied_stop_generation {
+        let emergency = self.shared_transport.emergency_stop.load(Ordering::Acquire);
+        let changed = generation != self.applied_stop_generation;
+        if changed || emergency {
+            self.resolve_pending(TransportCancelReason::Stopped);
             self.transport.apply(TransportCommand::Stop);
             self.applied_stop_generation = generation;
+            self.transport_context_id = generation;
             self.transport_generation = self
                 .transport_generation
                 .saturating_add(1)
                 .min(MAX_PUBLICATION_REVISION);
+        }
+        if dirty || changed {
+            self.transport_receipts.resolve_stops(
+                generation,
+                self.transport.snapshot().current_sample,
+                self.active_graph_revision,
+                self.transport_generation,
+            );
         }
     }
 

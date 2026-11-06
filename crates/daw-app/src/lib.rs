@@ -7,6 +7,7 @@ pub use preparation::{
 };
 
 use audio_backend::{AudioBackend, AudioOutputStream};
+pub use audio_engine::TransportCommandStatus;
 use audio_engine::{EngineControl, EngineGraph, EngineProcessor};
 use audio_types::{AudioConfig, AudioDeviceInfo, AudioError, RealtimeMetricsSnapshot};
 use daw_core::transport::{TransportCommand, TransportSnapshot};
@@ -33,6 +34,7 @@ pub struct DocumentStatus {
 #[derive(Debug, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PublicationStatus {
+    pub transport_commands: Option<audio_engine::TransportProtocolStatus>,
     pub stream_readiness: Option<audio_engine::StreamReadinessSnapshot>,
     pub streaming: daw_project::ProjectStreamingStatus,
     pub document_revision: u64,
@@ -40,6 +42,13 @@ pub struct PublicationStatus {
     pub engine_epoch: u64,
     pub engine: Option<audio_engine::GraphPublicationStatus>,
     pub preparation: Option<PreparationStatus>,
+}
+
+#[derive(Clone, Copy, Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TransportAcceptance {
+    pub engine_epoch: u64,
+    pub command_id: u64,
 }
 
 pub struct DawApplication {
@@ -179,6 +188,37 @@ impl DawApplication {
 
     pub fn send_transport(&self, command: TransportCommand) -> Result<(), AudioError> {
         self.control()?.send_transport(command)
+    }
+
+    pub fn submit_transport(
+        &self,
+        command: TransportCommand,
+    ) -> Result<TransportAcceptance, AudioError> {
+        Ok(TransportAcceptance {
+            engine_epoch: self.engine_epoch,
+            command_id: self.control()?.submit_transport(command)?,
+        })
+    }
+    pub fn transport_command_status(
+        &self,
+        epoch: u64,
+        id: u64,
+    ) -> Result<audio_engine::TransportCommandStatus, AudioError> {
+        self.check_transport_epoch(epoch)?;
+        self.control()?.transport_command_status(id)
+    }
+    pub fn cancel_transport_command(&self, epoch: u64, id: u64) -> Result<bool, AudioError> {
+        self.check_transport_epoch(epoch)?;
+        self.control()?.cancel_transport_command(id)
+    }
+    fn check_transport_epoch(&self, epoch: u64) -> Result<(), AudioError> {
+        if epoch == self.engine_epoch {
+            Ok(())
+        } else {
+            Err(AudioError::InvalidState(
+                "transport ID belongs to a different engine epoch",
+            ))
+        }
     }
 
     pub fn transport(&self) -> Result<TransportSnapshot, AudioError> {
@@ -480,6 +520,10 @@ impl DawApplication {
             .and_then(|status| status.published_revision)
             .or(self.requested_revision);
         PublicationStatus {
+            transport_commands: self
+                .control
+                .as_ref()
+                .map(EngineControl::transport_protocol_status),
             stream_readiness: self
                 .control
                 .as_ref()

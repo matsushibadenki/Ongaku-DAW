@@ -1,5 +1,6 @@
 export const messages = {
   en: {
+    transportCommand: "Transport", transportAccepted: "Accepted", transportPending: "Awaiting output admission", transportWaiting: "Waiting for audio", transportApplied: "Applied", transportCancelPending: "Cancellation requested", transportCanceled: "Canceled", transportFailed: "Audio read failed", transportCapacity: "Cache capacity exceeded", transportUpdating: "Updating result", transportHistoryLost: "Result not retained", transportNoRollback: "Already changed transport state is retained", transportExplicit: "Explicit cancellation", transportSuperseded: "Superseded by a newer output request", transportStopped: "Stopped",
     streamReady: "Audio window ready", streamWaiting: "Waiting for audio; playback position held", streamFailed: "Audio read failed; playback position held", streamCapacity: "Audio window exceeds cache capacity; playback position held", streamPages: "pages",
     graphPreparation: "Preparing audio update",
     editTiming: "Edit timing", lateEditNotice: "A scheduled edit was applied late.", adoptionHistoryNotice: "Some playback update confirmations are no longer available. Check the current audio revision.", audioRevision: "Audio R", graphRevisionHelp: "Adopted / accepted audio graph revision",
@@ -38,6 +39,7 @@ export const messages = {
     trackRoles: { rhythm: "Rhythm", bass: "Bass", atmosphere: "Atmosphere", lead: "Lead" },
   },
   ja: {
+    transportCommand: "Transport", transportAccepted: "受付済み", transportPending: "出力の準備確認待ち", transportWaiting: "音声の読込待ち", transportApplied: "適用完了", transportCancelPending: "キャンセル依頼中", transportCanceled: "キャンセル済み", transportFailed: "音声の読込失敗", transportCapacity: "キャッシュ容量超過", transportUpdating: "結果を更新中", transportHistoryLost: "結果は保持されていません", transportNoRollback: "変更済みの再生状態は巻き戻しません", transportExplicit: "明示的なキャンセル", transportSuperseded: "新しい出力要求に置換", transportStopped: "停止",
     streamReady: "音声の読込準備完了", streamWaiting: "音声の読込待ち・再生位置を保持中", streamFailed: "音声の読込失敗・再生位置を保持中", streamCapacity: "音声の読込範囲がキャッシュ容量を超過・再生位置を保持中", streamPages: "ページ",
     graphPreparation: "音声更新を準備中",
     editTiming: "編集の反映時刻", lateEditNotice: "指定位置を過ぎてから編集が反映されました。", adoptionHistoryNotice: "一部の再生更新の確認記録を取得できませんでした。現在の音声リビジョンを確認してください。", audioRevision: "音声 R", graphRevisionHelp: "採用済み / 受付済みの音声グラフリビジョン",
@@ -76,6 +78,7 @@ export const messages = {
     trackRoles: { rhythm: "リズム", bass: "ベース", atmosphere: "空気感", lead: "リード" },
   },
   zh: {
+    transportCommand: "Transport", transportAccepted: "已接受", transportPending: "等待输出准备确认", transportWaiting: "等待音频读取", transportApplied: "应用完成", transportCancelPending: "已请求取消", transportCanceled: "已取消", transportFailed: "音频读取失败", transportCapacity: "超出缓存容量", transportUpdating: "正在更新结果", transportHistoryLost: "结果未保留", transportNoRollback: "已更改的播放状态不会回退", transportExplicit: "明确取消", transportSuperseded: "已被新的输出请求替代", transportStopped: "已停止",
     streamReady: "音频窗口已就绪", streamWaiting: "正在等待音频，播放位置已保持", streamFailed: "音频读取失败，播放位置已保持", streamCapacity: "音频窗口超出缓存容量，播放位置已保持", streamPages: "页",
     graphPreparation: "正在准备音频更新",
     editTiming: "编辑应用时间", lateEditNotice: "编辑在指定位置之后才应用。", adoptionHistoryNotice: "部分播放更新的确认记录已不可用。请检查当前音频修订版本。", audioRevision: "音频 R", graphRevisionHelp: "已采用 / 已接受的音频图修订版本",

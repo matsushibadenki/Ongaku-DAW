@@ -7,6 +7,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::SeqCst};
 #[derive(Clone, Copy, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StreamReadinessSnapshot {
+    pub transport_command_id: u64,
     pub graph_revision: u64,
     pub transport_generation: u64,
     pub position: SamplePosition,
@@ -19,6 +20,7 @@ pub struct StreamReadinessSnapshot {
 pub(super) struct ReadinessReceipt {
     initialized: AtomicBool,
     sequence: AtomicU64,
+    command: AtomicU64,
     graph: AtomicU64,
     transport: AtomicU64,
     position: AtomicU64,
@@ -32,6 +34,7 @@ pub(super) struct ReadinessReceipt {
 impl ReadinessReceipt {
     pub fn publish(&self, snapshot: StreamReadinessSnapshot) {
         self.sequence.fetch_add(1, SeqCst);
+        self.command.store(snapshot.transport_command_id, SeqCst);
         self.graph.store(snapshot.graph_revision, SeqCst);
         self.transport.store(snapshot.transport_generation, SeqCst);
         self.position.store(snapshot.position.0, SeqCst);
@@ -61,6 +64,7 @@ impl ReadinessReceipt {
                 continue;
             }
             let snapshot = StreamReadinessSnapshot {
+                transport_command_id: self.command.load(SeqCst),
                 graph_revision: self.graph.load(SeqCst),
                 transport_generation: self.transport.load(SeqCst),
                 position: SamplePosition(self.position.load(SeqCst)),
@@ -99,6 +103,7 @@ mod tests {
         let worker = std::thread::spawn(move || {
             for generation in 1..10_000 {
                 writer.publish(StreamReadinessSnapshot {
+                    transport_command_id: generation,
                     graph_revision: generation,
                     transport_generation: generation * 2,
                     position: SamplePosition(generation * 3),
