@@ -10,7 +10,9 @@
     "tauri": "tauri",
     "test:mixer": "node --test tests/mixer-events.test.mjs",
     "test:midi": "node --test tests/midi-editor.test.mjs",
-    "test:transport": "node --test tests/transport-commands.test.mjs"
+    "test:transport": "node --test tests/transport-commands.test.mjs",
+    "test:output": "node --test tests/output-metrics.test.mjs",
+    "test:clock": "node --test tests/musical-grid.test.mjs"
   },
   "dependencies": {
     "@fontsource-variable/space-grotesk": "^5.3.0",

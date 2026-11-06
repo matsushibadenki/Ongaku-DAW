@@ -1,3 +1,4 @@
+import { createMusicalGrid } from "../utils/musical-grid.js";
 import { editProjectMidiClips } from "../utils/midi-clip-edit.js";
 import { editProjectMidiNotes } from "../utils/midi-clips.js";
 import { applyNoteSelection } from "../utils/midi.js";
@@ -165,7 +166,7 @@ function previewInvoke(command, args = {}) {
   switch (command) {
     case "get_transport_command_status": return Promise.resolve(null);
     case "cancel_transport_command": return Promise.resolve(false);
-    case "get_graph_publication_status": return Promise.resolve({ documentRevision: 0, requestedRevision: null, engineEpoch: 0, engine: null, preparation: null, streamReadiness: null, transportCommands: null });
+    case "get_graph_publication_status": return Promise.resolve({ documentRevision: 0, requestedRevision: null, engineEpoch: 0, engine: null, preparation: null, streamReadiness: null, transportCommands: null, outputConfiguration: null });
     case "list_output_devices": return Promise.resolve([{ id: "preview", name: "Preview Output", isDefault: true }]);
     case "default_output_config": return Promise.resolve({ sampleRate: 48_000, channels: 2, bufferSize: 128 });
     case "configure_project":
@@ -213,12 +214,12 @@ function previewInvoke(command, args = {}) {
     case "edit_midi_clip": {
       const clip = preview.project.tracks.find((track) => track.id === args.trackId)?.midiClips.find((item) => item.id === args.clipId);
       if (!clip) return Promise.reject(new Error("MIDI clip was not found"));
-      const grid = Math.max(1, Math.round(preview.project.sampleRate * 60 / preview.project.tempoBpm * 4 / args.amount));
+      const grid = args.action === "quantize" ? createMusicalGrid(preview.project.sampleRate, preview.project.tempoBpm, args.amount) : null;
       if (args.action === "delete") clip.notes = clip.notes.filter((note) => note.id !== args.noteId);
       else clip.notes = clip.notes.map((note) => {
         if (args.noteId != null && note.id !== args.noteId) return note;
         if (args.action === "transpose") return { ...note, key: Math.max(0, Math.min(127, note.key + args.amount)) };
-        const start = Math.min(clip.durationSamples - 1, Math.floor((note.start + Math.floor(grid / 2)) / grid) * grid);
+        const start = Math.min(clip.durationSamples - 1, grid(note.start));
         return { ...note, start, durationSamples: Math.min(note.durationSamples, clip.durationSamples - start) };
       }).sort((a, b) => a.start - b.start || a.id - b.id);
       return Promise.resolve(structuredClone(preview.project));
@@ -269,7 +270,7 @@ function previewInvoke(command, args = {}) {
     case "set_gain": return Promise.resolve();
     case "get_transport_snapshot": return Promise.resolve(preview.running ? preview.transport : null);
     case "get_metrics": return Promise.resolve(preview.running ? {
-      callbackCount: 15_841, xrunCount: 0, backendErrorCount: 0,
+      callbackCount: 15_841, xrunCount: 0, processDeadlineMissCount: 0, backendErrorCount: 0, output: null,
       averageCallbackUs: 1, maximumCallbackUs: 8, p99_9CallbackUs: 4,
       deadlineUs: 2_667, cpuLoad: 0.001,
     } : null);

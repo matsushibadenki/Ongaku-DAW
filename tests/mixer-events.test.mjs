@@ -35,8 +35,12 @@ test("preview reports no native adoption and rejects imprecise revision cursors"
   const status = await engineApi.publicationStatus();
   assert.equal(status.engine, null);
   assert.equal(status.preparation, null);
+  assert.equal(status.outputConfiguration, null);
   assert.equal(status.streamReadiness, null);
   assert.equal(status.requestedRevision, null);
   await assert.rejects(engineApi.publicationStatus(Number.MAX_SAFE_INTEGER + 1));
   await assert.rejects(engineApi.publicationStatus(-1));
+  await engineApi.start(null, { sampleRate: 48000, channels: 2, bufferSize: 128 });
+  assert.equal((await engineApi.metrics()).output, null);
+  await engineApi.stop();
 });

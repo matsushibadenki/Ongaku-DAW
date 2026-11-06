@@ -34,6 +34,7 @@ pub struct DocumentStatus {
 #[derive(Debug, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PublicationStatus {
+    pub output_configuration: Option<audio_types::OutputConfiguration>,
     pub transport_commands: Option<audio_engine::TransportProtocolStatus>,
     pub stream_readiness: Option<audio_engine::StreamReadinessSnapshot>,
     pub streaming: daw_project::ProjectStreamingStatus,
@@ -57,6 +58,7 @@ pub struct DawApplication {
     state: EngineState,
     project: Project,
     active_config: Option<AudioConfig>,
+    output_configuration: Option<audio_types::OutputConfiguration>,
     undo: Vec<(Project, u64)>,
     redo: Vec<(Project, u64)>,
     revision: u64,
@@ -97,6 +99,7 @@ impl DawApplication {
             state: EngineState::Stopped,
             project: Project::demo(sample_rate)?,
             active_config: None,
+            output_configuration: None,
             undo: Vec::new(),
             redo: Vec::new(),
             revision: 0,
@@ -126,6 +129,21 @@ impl DawApplication {
         config: AudioConfig,
     ) -> Result<(), AudioError> {
         if self.state == EngineState::Running {
+            if self.active_config != Some(config) {
+                return Err(AudioError::InvalidState(
+                    "stop the engine before changing output format",
+                ));
+            }
+            if let Some(id) = device_id
+                && self
+                    .output_configuration
+                    .as_ref()
+                    .is_none_or(|selection| selection.device_id != id)
+            {
+                return Err(AudioError::InvalidState(
+                    "stop the engine before selecting or verifying another output device",
+                ));
+            }
             return Ok(());
         }
         if self.project.snapshot().sample_rate != config.sample_rate {
@@ -138,6 +156,7 @@ impl DawApplication {
             .checked_add(1)
             .filter(|epoch| *epoch <= audio_engine::MAX_PUBLICATION_REVISION)
             .ok_or(AudioError::InvalidState("engine epochs exhausted"))?;
+        backend.validate_output_config(device_id, config)?;
         let graph = self.project.build_audio_graph(config)?;
         let (processor, control) = EngineProcessor::prepare(config)?;
         let requested_revision =
@@ -151,7 +170,17 @@ impl DawApplication {
             None
         };
         let mut stream = backend.open_output(device_id, config, Box::new(processor))?;
+        let output_configuration = stream.output_configuration();
+        if output_configuration
+            .as_ref()
+            .is_some_and(|selection| selection.requested != config || selection.validated != config)
+        {
+            return Err(AudioError::InvalidState(
+                "backend output selection differs from the requested project format",
+            ));
+        }
         stream.start()?;
+        self.output_configuration = output_configuration;
         self.stream = Some(stream);
         self.control = Some(control);
         self.state = EngineState::Running;
@@ -171,6 +200,7 @@ impl DawApplication {
         self.control = None;
         self.state = EngineState::Stopped;
         self.active_config = None;
+        self.output_configuration = None;
         self.requested_revision = None;
         Ok(())
     }
@@ -520,6 +550,7 @@ impl DawApplication {
             .and_then(|status| status.published_revision)
             .or(self.requested_revision);
         PublicationStatus {
+            output_configuration: self.output_configuration.clone(),
             transport_commands: self
                 .control
                 .as_ref()
@@ -1502,3 +1533,74 @@ mod tests {
 
 #[cfg(test)]
 mod streaming_tests;
+
+#[cfg(test)]
+mod output_tests;
+
+#[cfg(test)]
+mod musical_quantize_tests {
+    use super::*;
+
+    #[test]
+    fn fractional_grid_edit_history_storage_and_graph_adoption_agree() {
+        let config = AudioConfig {
+            sample_rate: 44_100,
+            ..AudioConfig::DEFAULT
+        };
+        let mut app = DawApplication::with_sample_rate(config.sample_rate).unwrap();
+        app.write_midi_note(4, 4100, Some(4000), 88_100, 1_000, 60)
+            .unwrap();
+        let before = app.project();
+        let (mut processor, control) = EngineProcessor::prepare(config).unwrap();
+        control
+            .submit_graph(EngineGraph::timeline(
+                app.project.build_audio_graph(config).unwrap(),
+            ))
+            .unwrap();
+        app.active_config = Some(config);
+        app.control = Some(control);
+        processor.process_block(&mut [0.0; 256]);
+        app.edit_midi_clip(4, 4100, "quantize", 16, Some(4000))
+            .unwrap();
+        let quantized = app.project();
+        let note = quantized.tracks[3].midi_clips[0]
+            .notes
+            .iter()
+            .find(|note| note.id == 4000)
+            .unwrap();
+        assert_eq!(note.start.0, 88_200);
+        assert_eq!(note.duration_samples, 1_000);
+        let verify_adoption = |app: &DawApplication, processor: &mut EngineProcessor| {
+            processor.process_block(&mut [0.0; 256]);
+            let status = app.publication_status(0);
+            let engine = status.engine.unwrap();
+            assert_eq!(Some(engine.adopted_revision), status.requested_revision);
+            assert_eq!(
+                engine.acknowledgements.last().unwrap().document_revision,
+                app.revision
+            );
+        };
+        verify_adoption(&app, &mut processor);
+        assert_eq!(app.undo().unwrap(), before);
+        verify_adoption(&app, &mut processor);
+        assert_eq!(app.redo().unwrap(), quantized);
+        verify_adoption(&app, &mut processor);
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("fractional-grid.ongaku");
+        app.save_project(&path).unwrap();
+        app.undo().unwrap();
+        assert_eq!(app.load_project(&path).unwrap(), quantized);
+        // Loading intentionally stops the engine and invalidates old receipts.
+        assert!(app.publication_status(0).engine.is_none());
+        let (mut restarted, control) = EngineProcessor::prepare(config).unwrap();
+        let revision = control
+            .submit_latest_timeline(app.project.build_audio_graph(config).unwrap(), app.revision)
+            .unwrap();
+        app.active_config = Some(config);
+        app.control = Some(control);
+        app.requested_revision = Some(revision);
+        verify_adoption(&app, &mut restarted);
+        assert!(!app.document_status().dirty);
+        assert!(!app.document_status().can_undo);
+    }
+}

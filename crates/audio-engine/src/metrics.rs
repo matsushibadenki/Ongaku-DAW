@@ -1,5 +1,6 @@
+use crate::output_metrics::OutputMetrics;
 use audio_backend::RealtimeEventSink;
-use audio_types::RealtimeMetricsSnapshot;
+use audio_types::{AudioConfig, OutputFault, RealtimeMetricsSnapshot};
 use std::{
     array,
     sync::atomic::{AtomicU64, Ordering},
@@ -10,6 +11,7 @@ const HISTOGRAM_BUCKETS: usize = 64;
 
 /// Fixed-memory realtime metrics. Buckets are powers of two in microseconds.
 pub struct RealtimeMetrics {
+    output: OutputMetrics,
     default_deadline_ns: u64,
     deadline_ns: AtomicU64,
     total_budget_ns: AtomicU64,
@@ -25,12 +27,20 @@ impl RealtimeEventSink for RealtimeMetrics {
     fn report_backend_error(&self) {
         self.record_backend_error();
     }
+    fn report_output_fault(&self, fault: OutputFault) {
+        self.backend_error_count.fetch_add(1, Ordering::Relaxed);
+        self.output.fault(fault);
+    }
+    fn report_output_callback(&self, config: AudioConfig, samples: usize, duration: Duration) {
+        self.output.record(config, samples, duration);
+    }
 }
 
 impl RealtimeMetrics {
     #[must_use]
     pub fn new(deadline_ns: u64) -> Self {
         Self {
+            output: OutputMetrics::new(),
             default_deadline_ns: deadline_ns,
             deadline_ns: AtomicU64::new(deadline_ns),
             total_budget_ns: AtomicU64::new(0),
@@ -85,6 +95,7 @@ impl RealtimeMetrics {
     }
 
     pub fn record_backend_error(&self) {
+        self.output.driver_error();
         self.backend_error_count.fetch_add(1, Ordering::Relaxed);
     }
 
@@ -100,9 +111,12 @@ impl RealtimeMetrics {
         } else {
             total as f64 / count as f64 / 1_000.0
         };
+        let process_misses = self.xrun_count.load(Ordering::Relaxed);
         RealtimeMetricsSnapshot {
+            output: self.output.snapshot(),
             callback_count: count,
-            xrun_count: self.xrun_count.load(Ordering::Relaxed),
+            xrun_count: process_misses,
+            process_deadline_miss_count: process_misses,
             backend_error_count: self.backend_error_count.load(Ordering::Relaxed),
             average_callback_us: average_us,
             maximum_callback_us: maximum as f64 / 1_000.0,

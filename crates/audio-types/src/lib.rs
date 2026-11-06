@@ -1,5 +1,9 @@
 //! Shared, backend-independent contracts for the audio system.
 
+mod output;
+pub use output::{
+    OutputBufferRange, OutputConfiguration, OutputFault, OutputMetricsSnapshot, OutputSampleFormat,
+};
 mod readiness;
 pub use readiness::{StreamReadiness, StreamReadinessState};
 mod preparation;
@@ -77,8 +81,12 @@ pub struct AudioDeviceInfo {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RealtimeMetricsSnapshot {
+    #[serde(default)]
+    pub output: OutputMetricsSnapshot,
     pub callback_count: u64,
     pub xrun_count: u64,
+    #[serde(default)]
+    pub process_deadline_miss_count: u64,
     pub backend_error_count: u64,
     pub average_callback_us: f64,
     pub maximum_callback_us: f64,

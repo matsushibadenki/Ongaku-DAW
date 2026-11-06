@@ -190,3 +190,14 @@
 .studio-shell .stream-readiness { display: inline-flex; align-items: center; flex: 0 0 auto; color: var(--color-success); }
 .studio-shell .stream-readiness[data-state="waiting"] { color: var(--color-accent); }
 .studio-shell .stream-readiness[data-state="failed"], .studio-shell .stream-readiness[data-state="capacityExceeded"] { color: var(--color-error); }
+
+/* Keep diagnostics readable inside the compact preferences popover. */
+.studio-shell .app-preferences {
+  grid-template-columns: minmax(0, 1fr);
+  max-height: calc(100dvh - 3rem);
+  overflow: auto;
+}
+.studio-shell .app-preferences .performance-details[open] { max-height: 22rem; }
+.studio-shell .app-preferences .metrics-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.studio-shell .app-preferences .panel-header h2 { font-size: var(--text-sm); }
+.studio-shell .app-preferences .performance-details { grid-area: auto; }

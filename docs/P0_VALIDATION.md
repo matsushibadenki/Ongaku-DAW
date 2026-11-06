@@ -302,3 +302,105 @@ Temporary artifacts remain outside the repository: `/tmp/transport-ui.mjs`, `/tm
 🟠 [Next] Scheduled deadline admission, atomic command batches, exportable/durable audit history, shutdown outcomes beyond the current engine, controller/panic coverage, multi-stream fairness, interruptible I/O and automatic recovery. A terminal command result is its first resolution, not a guarantee that later playback windows remain ready.
 
 ⭕️ [Pending] Hardware/driver timing, listening, real storage/device faults, measured receipt-contention/overload latency and endurance qualification. No comparative DAW performance or sample-timed future execution claim is made.
+
+## Twelfth batch — output negotiation and PCM callback boundaries
+
+Date: 2026-11-06. Scope: advertised output validation, startup failure integrity and prepared sample adapters. No Pro-Wave source/assets were read or reused. See the [output contract](OUTPUT_CONFIGURATION.md).
+
+🟢 [Done] CPAL preflight checks the requested sample rate, channel count and fixed buffer against advertised ranges, then revalidates at open and selects the matching encoding. It no longer uses an unrelated default sample format. Default buffer discovery respects advertised bounds; unknown bounds remain explicitly unknown. Native publication status reports selected device, requested/validated configuration, encoding and optional advertised range. This does not claim a measured physical driver period.
+
+🟢 [Done] Unsupported settings are rejected before graph preparation. Injected preflight/open/start/report failures preserve the project, revision, Undo/Redo branch and uncommitted engine epoch; a subsequent valid startup succeeds. Mismatched reports are rejected before playback starts. Idempotent running Start requires the same active configuration and a matching explicitly requested device; incompatible settings are rejected without replacing the live stream. Selection metadata survives history and clears on stop. The mock rejects unknown IDs; browser preview reports null output metadata.
+
+🟢 [Done] F32/I16/U16 output boundaries initialize silence, preserve frame alignment, normalize finite/clipped samples and replace non-finite data with silence. Exact integer fixtures confirm signed -32768/0/32767, unsigned 0/32768/65535 and both half scales, removing the previous one-step endpoint/equilibrium biases. Prepared integer scratch is cleared and never resized in the callback. Oversized or incomplete converted frames silence/report errors without calling the source; valid subsequent buffers recover. Empty callbacks preserve the zero-frame Transport policy. Invalid samples report one aggregate backend error per block.
+
+🟢 [Done] Rust 1.93.0 Debug and Release workspace suites each pass **165 tests**, including **8 CPAL adapter**, **25 application**, **44 engine**, **24 project** and **23 streaming** tests. Capability tests use pure CPAL range fixtures; application tests inject four failure stages, retry, verify history and check running-start/device behavior. Adapter tests cover exact conversion, non-finite data, malformed/oversized/empty buffers, recovery and scratch clearing. Instrumented F32/I16/U16 normal/fault paths observe **zero callback allocations and frees**. The final boolean simplification of the running-device guard was also rechecked with both application output tests in Debug/Release. Formatting and Clippy complete with only existing project/MIDI warnings.
+
+Commands, using the pinned-toolchain PATH described above:
+
+```sh
+cargo fmt --all --check
+cargo test --workspace --offline
+cargo test --workspace --release --offline
+cargo test -p daw-app --offline output_tests
+cargo test -p daw-app --release --offline output_tests
+cargo clippy --workspace --all-targets --offline
+npm run test:mixer
+npm run test:midi
+npm run test:transport
+npm run build
+```
+
+The existing two mixer, two Transport and one MIDI JavaScript tests and the production Vite build pass. The preview API regression checks that output selection is null; no rendered UI surface changed in this batch.
+
+🟠 [Next] Measured requested-versus-observed driver settings, separate adapter/driver error counters, bounded variable-period handling, more sample encodings, resource limits and device fault/recovery lifecycle. Oversized integer buffers intentionally silence and notify; they do not promise transparent variable-period playback. Backend-error counts include adapter faults and are not physical xrun counts.
+
+⭕️ [Pending] Actual macOS/Windows/Linux device/format matrices, hot unplug/default-device transitions, loopback/listening, physical latency and endurance qualification. No hardware output was opened by these pure/injected regression tests.
+
+## Thirteenth batch — output observability and truthful diagnostics
+
+🟢 [Done] Fixed atomic output observations separate adapter-body timing from engine processing. Synthetic delivered periods test weighted load/deadlines, requested-size mismatches, min/max/last frames and unobserved states. Invalid/empty deliveries cannot inflate positive-period duration statistics. Driver notifications, typed adapter fault subtypes and process deadline misses remain separate while preserving legacy aggregate/alias fields. Legacy event sinks retain fault notifications.
+
+🟢 [Done] Debug and Release workspace suites each pass **169 tests** (47 engine, 1 backend, 8 CPAL adapter, 25 application, 24 project, 23 streaming, plus other workspace tests). Existing graph/Undo/Redo, scheduled edits, Transport, streaming and persistence regressions remain passing. Normal/fault F32/I16/U16 paths retain zero callback allocations/frees with observations enabled. Rust 1.93.0 formatting and Clippy complete; only existing project/MIDI warnings remain.
+
+Node 22.17.1 `npm run test:output`, `npm run test:transport`, `npm run test:mixer`, `npm run test:midi` pass (seven top-level tests total); `npm run build` passes. Native commands remain `cargo test --workspace --offline`, `cargo test --workspace --release --offline`, `cargo clippy --workspace --all-targets --offline` and `cargo fmt --all --check`, with the pinned toolchain binaries first on PATH.
+
+| Browser QA | Evidence |
+| --- | --- |
+| Environment | Local Vite, cached Playwright Chromium; Browser plugin unavailable, so Playwright fallback; no dependency installation |
+| EN / JA / Simplified Chinese | Observed 64–512 (256) frames, 12.50% output load, 13 diagnostic rows; explicit process count overrides legacy alias |
+| Unknown/absent observations | Dash for unobserved load; absent output removes five output rows; no fabricated native observations |
+| Layout | 1440×1000 and 390×844; compact preferences uses a single column and scrollable diagnostics; corrected inherited grid-area placement |
+| Runtime | No page errors; `/tmp/observed-ui.mjs`, `/tmp/observed-desktop.png`, `/tmp/observed-mobile.png` are local QA artifacts |
+
+These browser values are injected presentation fixtures, not native timing measurements. See [output telemetry](OUTPUT_TELEMETRY.md) for field semantics and limits.
+
+🟠 [Next] Wake-up/physical driver-xrun observations, finer histograms, off-thread export, variable-period recovery and device lifecycle/resource limits.
+
+⭕️ [Pending] Actual-device callback behavior, clock/latency, listening/loopback, unplug/recovery and endurance. Software and browser tests do not qualify physical playback.
+
+## Fourteenth batch — exact musical conversion and quantization boundary
+
+🟢 [Done] Constant-tempo bar/beat/tick conversion now uses bounded `u128` rational arithmetic with exact binary-tempo decomposition and quotient/remainder doubling. It rounds nearest with ties upward and saturates at the sample-position limit; normalization of invalid tempo/signature inputs is preserved. The reproduced 48 kHz, 400 BPM, 7/8 long-timeline case now resolves to sample 29,955,083,044,703 instead of the former one-sample-short result.
+
+🟢 [Done] Legacy single-clip quantization computes grid width through the same conversion. At 399.8889197445154 BPM the sixteenth-note width is correctly 1800 rather than 1801 samples; an integration regression checks the resulting note start, unchanged duration and velocity. No stored sample positions or project schema are migrated. Explicit sample-grid multi-note/clip operations keep their existing semantics.
+
+Seven new core tests exercise **583,872** direct rational-oracle combinations, exact half-sample rounding and adjacent binary tempos, external exact decimal-tempo fixtures, tick carry/monotonicity, invalid-input compatibility, saturation and half-open range endpoints. The independent oracle neither decodes the tempo bits nor uses production long division. Existing partitioned loop-oracle, graph, streaming, Transport, history and storage suites remain regression gates. The project adds one quantization integration test. See [musical clock contract](MUSICAL_CLOCK.md) for scope and numeric bounds.
+
+Final native verification: the full workspace suites each pass **176 tests in Debug and Release**; the subsequently added project boundary regression also passes separately in both profiles (**177 covered tests in total per profile**, 12 core and 25 project). The final implementation passes workspace Clippy with existing MIDI/project warnings only; the floating conversion's two project cast warnings are removed. Formatting, whitespace and local documentation links pass. No callback allocation/free or continuity regression is observed in the existing instrumented suites.
+
+JavaScript MIDI (one), mixer (two), Transport (two) and output diagnostics (two) tests pass; the production Vite build passes with Node 22.17.1. No rendered UI changed in this batch. Commands use Rust 1.93.0 binaries first on PATH, with offline workspace Debug/Release tests, Clippy and formatting checks as documented above.
+
+🟠 [Next] Tempo-map/tick-domain document model, inverse conversion, absolute-position musical quantization across clips and broader clip/event interval ownership tests. Repeated rounded-grid spacing is explicitly unchanged; constant-tempo conversion does not complete all musical-clock work.
+
+⭕️ [Pending] Physical clock drift, synchronization hardware, loopback/listening and endurance qualification. Pro-Wave code/assets were not read or reused.
+
+## Fifteenth batch — fractional-period musical quantization
+
+🟢 [Done] `MusicalGrid` prepares an exact rational whole-note subdivision and selects a musical index before rounding that individual position to samples. This removes repeated rounded-step drift from legacy single-clip quantization. At 44.1 kHz, 120 BPM and sixteenths, sample 88,200 no longer moves to 88,208. The clip-local origin, note targeting, bounds and expression remain intact; explicit integer-grid multi-note/cross-clip commands retain their API.
+
+Three new core tests cover **46,080** independent distance-oracle/idempotence combinations, fractional positions, forward midpoint ties, invalid grids/tempo normalization, one-sample minimum, monotonicity at integer limits and saturation. A project regression preserves an exactly aligned note and repeats quantization without changes. An application regression quantizes 88,100 to 88,200, verifies duration, adopts graph revisions through Undo/Redo, saves/loads the edited document and checks graph adoption after restart. Loading deliberately clears the prior engine/receipt state; the fixture follows that lifecycle rather than asserting a surviving stopped engine.
+
+Preview uses a BigInt equivalent without native callback ownership. `npm run test:clock` adds two tests for fractional/exact-tempo boundaries, safe-integer/idempotence handling and the preview edit/Undo/Redo/storage workflow. Existing MIDI, mixer, Transport and output tests remain passing, as does the production build. No rendered UI or localization strings changed.
+
+
+Final verification: **182 workspace tests pass in both Debug and Release** (15 core, 26 project, 26 application). The native suite includes unchanged callback allocation/free, sustained MIDI, graph history, streaming admission and Transport regression gates. Clippy completes with existing project/MIDI warnings only; no new grid/application warnings. JavaScript tests pass nine top-level cases in total, and the production Vite build passes. Formatting, whitespace and local documentation-link checks pass.
+Reproducible checks (Rust 1.93.0 / Node 22.17.1, toolchain binaries first on PATH):
+
+```sh
+cargo test --workspace --offline
+cargo test --workspace --release --offline
+cargo clippy --workspace --all-targets --offline
+cargo fmt --all --check
+npm run test:clock
+npm run test:midi
+npm run test:mixer
+npm run test:transport
+npm run test:output
+npm run build
+```
+
+The Rust grid uses no allocation, lock or I/O; all new conversion work runs on the control thread. Prepared callback work is unchanged. See [musical grid arithmetic, ownership and bounds](MUSICAL_CLOCK.md).
+
+🟠 [Next] Project-origin musical quantization across clips, tempo maps/tick-domain documents, inverse conversion and tempo-edit continuity. The current correction applies when requesting musical single-clip quantization; existing stored notes are never silently retimed.
+
+⭕️ [Pending] Physical timing, listening/loopback, external sync and endurance. No Pro-Wave code/assets were read or reused.

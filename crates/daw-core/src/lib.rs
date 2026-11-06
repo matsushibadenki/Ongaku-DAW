@@ -1,5 +1,6 @@
 //! Sample-accurate domain types shared by control and realtime layers.
 
+pub mod musical_grid;
 pub mod transport;
 
 use serde::{Deserialize, Serialize};

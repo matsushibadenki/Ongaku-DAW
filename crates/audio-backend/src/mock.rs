@@ -1,5 +1,7 @@
 use crate::{AudioBackend, AudioCallback, AudioOutputStream};
-use audio_types::{AudioConfig, AudioDeviceInfo, AudioError};
+use audio_types::{
+    AudioConfig, AudioDeviceInfo, AudioError, OutputConfiguration, OutputSampleFormat,
+};
 use std::sync::{Arc, Mutex};
 
 #[derive(Clone, Default)]
@@ -27,13 +29,27 @@ impl AudioBackend for MockAudioBackend {
         Ok(AudioConfig::DEFAULT)
     }
 
+    fn validate_output_config(
+        &self,
+        device_id: Option<&str>,
+        config: AudioConfig,
+    ) -> Result<(), AudioError> {
+        config.validate()?;
+        if let Some(id) = device_id
+            && id != "mock-default"
+        {
+            return Err(AudioError::DeviceNotFound(id.into()));
+        }
+        Ok(())
+    }
+
     fn open_output(
         &self,
-        _device_id: Option<&str>,
+        device_id: Option<&str>,
         config: AudioConfig,
         callback: Box<dyn AudioCallback>,
     ) -> Result<Box<dyn AudioOutputStream>, AudioError> {
-        config.validate()?;
+        self.validate_output_config(device_id, config)?;
         Ok(Box::new(MockOutputStream {
             config,
             callback,
@@ -64,6 +80,16 @@ impl MockOutputStream {
 }
 
 impl AudioOutputStream for MockOutputStream {
+    fn output_configuration(&self) -> Option<OutputConfiguration> {
+        Some(OutputConfiguration {
+            device_id: "mock-default".into(),
+            requested: self.config,
+            validated: self.config,
+            sample_format: OutputSampleFormat::F32,
+            advertised_buffer_range: None,
+        })
+    }
+
     fn start(&mut self) -> Result<(), AudioError> {
         if !self.running {
             self.running = true;

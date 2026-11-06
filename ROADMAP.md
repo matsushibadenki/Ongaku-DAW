@@ -229,16 +229,49 @@ Evidence and reproducible commands: [P0 validation record](docs/P0_VALIDATION.md
 - 🟠 [Next] **Protocol completion:** scheduled deadline admission, atomic command batches, longer/exportable audit history and explicit outcomes beyond engine shutdown; controller/panic coverage and broader device/resource qualification.
 - ⭕️ [Pending] Physical timing/listening, measured contention/overload latency and endurance. Acceptance IDs are not scheduled-sample execution guarantees.
 
+### Twelfth implementation batch — output negotiation and callback boundaries (2026-11-06)
+
+- 🟢 [Done] **Advertised capability matching:** CPAL preflight validates the requested rate/channels/fixed buffer and chooses a supported format from matching ranges, then revalidates at open. Known buffer bounds and deterministic format selection replace the unrelated-default-format path. Default buffer discovery respects advertised bounds; explicit requests never silently resample/rechannel/fallback.
+- 🟢 [Done] **Transactional startup/reporting:** unsupported output is rejected before graph preparation. Open/start/report failures preserve project/history and do not commit an engine session. A running Start only succeeds for matching settings/device identity. Native status reports selected device, requested/validated config, encoding and known/unknown buffer bounds, retaining metadata through history and clearing it on stop.
+- 🟢 [Done] **PCM boundary accuracy:** correct signed endpoints/half scale and unsigned silence equilibrium, finite/clamped F32 output, cleared prepared scratch, and explicit silent/error handling of malformed or oversized converted output. Sources do not advance behind rejected output; empty callbacks retain the engine's zero-frame policy.
+- 🟢 [Done] **Evidence:** pure supported-range selection/default/boundary tests; injected startup failures and successful retry/history; idempotence and mismatched running requests; exact F32/I16/U16 fixtures, fault/recovery and callback allocation/free checks. Debug and Release workspace suites each pass 165 tests; adapter allocation/free gates, API tests and the production frontend build pass. See the [output contract](docs/OUTPUT_CONFIGURATION.md) and [P0 validation](docs/P0_VALIDATION.md).
+- 🟠 [Next] **Observed device behavior:** physical rate/scheduling observation, bounded variable-period support (delivered periods and distinct counters are implemented in batch thirteen), broader encodings/resource limits and device recovery. Advertised/validated selection is not a measured physical configuration.
+- ⭕️ [Pending] Hardware device/format matrix, hot unplug/default-device changes, listening/loopback, physical latency and endurance qualification.
+
+### Thirteenth implementation batch — honest output observability (2026-11-06)
+
+- 🟢 [Done] **Separate timing domains:** engine process deadline misses have an explicit name while retaining the legacy xrun alias. CPAL adapter-body duration/load/deadlines include clearing and conversion, without claiming driver scheduling or physical latency measurement.
+- 🟢 [Done] **Delivered periods and typed faults:** actual callback frame minimum/maximum/last and fixed-request mismatch counters; distinct driver notifications, adapter faults and malformed/capacity/non-finite subtypes. Empty/invalid callbacks do not distort positive-period timing. Fixed atomic storage preserves callback allocation/free gates.
+- 🟢 [Done] **Localized diagnostics and regression gates:** EN/JA/Simplified Chinese output rows, unknown-state handling, truthful process labels, readable scrollable preferences; 169 Rust tests pass in Debug and Release, including existing history/graph/stream/Transport tests. See [telemetry contract](docs/OUTPUT_TELEMETRY.md) and [validation](docs/P0_VALIDATION.md).
+- 🟠 [Next] **Timing and recovery completion:** wake-up timestamps, actual driver xrun reporting, finer tail histograms, off-thread export, bounded variable-period handling and device recovery/resource limits.
+- ⭕️ [Pending] Physical clock/latency, real-device periods, listening/loopback, device faults and endurance qualification.
+
+### Fourteenth implementation batch — exact constant-tempo musical conversion (2026-11-06)
+
+- 🟢 [Done] **Integer conversion:** absolute bar/beat/tick conversion preserves the exact supplied binary tempo, rounds once with ties upward and saturates safely. Integer quotient/remainder arithmetic fixes a reproduced one-sample long-timeline error without changing tempo/signature normalization.
+- 🟢 [Done] **Editing integration:** legacy single-clip quantization shares the exact grid-width conversion. Stored sample positions, explicit sample-grid edits, Undo/Redo and project schemas retain their existing contracts.
+- 🟢 [Done] **Independent regression evidence:** 583,872 direct rational-oracle combinations, adjacent-float half-sample boundaries, decimal-tempo fixtures, carry/monotonicity, saturation and half-open range tests. See [musical clock](docs/MUSICAL_CLOCK.md) and [P0 validation](docs/P0_VALIDATION.md).
+- 🟠 [Next] Tempo-map/tick-domain document model, inverse conversion, exact absolute musical quantization and broader clip/event interval ownership tests.
+- ⭕️ [Pending] Physical clock drift, external synchronization, loopback and endurance qualification.
+
+### Fifteenth implementation batch — drift-free musical quantization (2026-11-06)
+
+- 🟢 [Done] **Exact subdivision positions:** single-clip musical quantization selects the nearest rational grid index and rounds its position once, rather than multiplying a rounded step. At 44.1 kHz / 120 BPM / sixteenths, sample 88,200 remains exact instead of drifting eight samples. Clip-local origin, bounds, expression and stored sample positions retain their contracts.
+- 🟢 [Done] **Bounded control arithmetic:** prepared `u128` grid ratios, explicit invalid/minimum-period handling, forward ties and safe saturation. No new callback work or project schema migration. Preview uses a safe-integer BigInt equivalent.
+- 🟢 [Done] **Regression coverage:** 46,080 independent distance-oracle/idempotence combinations, fractional/half-sample and integer-limit fixtures, note-preservation regression and application graph-adoption/Undo/Redo/save/load checks. Debug and Release each pass 182 workspace tests; nine JavaScript tests and the production build pass. See [musical clock](docs/MUSICAL_CLOCK.md) and [P0 validation](docs/P0_VALIDATION.md).
+- 🟠 [Next] Project-origin musical quantization across clips, tempo-map/tick-domain document model, inverse conversion and tempo-edit continuity. Explicit sample-grid selection commands retain their separate API.
+- ⭕️ [Pending] Physical timing, listening/loopback, external synchronization and endurance qualification.
+
 ### Remaining P0 work
 
-- 🟠 [Next] **Clock oracle:** integer sample/tick model; independent musical-time conversion reference; exhaustive edge and overflow tests; explicit half-open clip/loop intervals.
+- 🟠 [Next] **Clock oracle completion:** exact constant-tempo conversion, independent rational reference and edge/overflow/range tests are implemented in batch fourteen. Single-clip fractional musical grids are implemented in batch fifteen. Add a tempo-map/tick-domain document model, inverse conversion, project-origin musical quantization across clips and broader clip/event interval ownership tests.
 - 🟠 [Next] **MIDI lifetime completion:** sustain/controller chase, explicit all-notes-off/panic behavior, and continuity through live edits. Reference-instrument identity, overlap ownership, and deterministic stealing are complete within the scope above.
 - 🟠 [Next] **Graph continuity completion:** reference-instrument voices now survive compatible mixer, unrelated-note, reorder, and history publications. Position-addressed project streams now share immutable media/cache state across edit/history graphs. Per-callback stream admission is implemented in the tenth batch. Add general processor/effect-tail contracts and scheduled readiness/deadline guarantees; incompatible instruments retain explicit fresh-state behavior.
 - 🟠 [Next] **Parameter transitions completion:** timestamped external control, scheduled Transport/controller acknowledgements, graphical event lanes, plugin bypass ramps, and broader listening/zipper-noise qualification. Prepared Gain/Pan/Mute/Solo event timelines are implemented below. Track Gain/Pan/Mute/Solo and master Gain publication ramps are complete within the scope below; timeline positions are unchanged.
 - 🟠 [Next] **Command protocol completion:** prepared graph revisions, rejection rollback, bounded adoption receipts and late-edit notices are implemented. Pending snapshot cancellation/coalescing is implemented below. Background graph preparation cancellation is implemented below. Transport acceptance IDs, readiness/cancellation results and epoch checks are implemented in the eleventh batch. Add scheduled admission, atomic batches, shutdown/audit outcomes, cancellation for future processors/import/analysis and a complete panic/controller protocol; retain the existing out-of-band Stop barrier.
-- 🟠 [Next] **Callback telemetry completion:** finer tail resolution, distinct driver/wake-up/process counters, and off-thread telemetry export. Actual-block budgets and fixed-memory collection are implemented; histogram percentiles remain approximate.
+- 🟠 [Next] **Callback telemetry completion:** finer tail resolution, wake-up/physical driver-xrun counters, and off-thread telemetry export. Process/output-body timings and driver-notification/adapter-fault counters are separated in batch thirteen. Actual-block budgets and fixed-memory collection are implemented; histogram percentiles remain approximate.
 - 🟠 [Next] **Streaming discipline completion:** foundation seek generations, stale rejection, complete-frame delivery, bounded draining/read-ahead and synthetic stalled-read tests are implemented above. Project/loop/graph integration and shared-media ownership are implemented in the ninth batch. Complete-window readiness and transport holds are implemented in the tenth batch. Add scheduled deadline admission, multi-stream resource budgets/audits, interruptible I/O/recovery and measured storage-stall qualification.
-- 🟠 [Next] **Device negotiation:** validate supported sample rates/channels/buffers; report requested versus actual settings; reject unsupported configurations without replacing the project or silently rebuilding the demo.
+- 🟠 [Next] **Device negotiation completion:** advertised matching, failure-safe startup and requested/validated selection reporting are implemented in the twelfth batch. Delivered-period telemetry is implemented in batch thirteen. Add physical rate/scheduling telemetry, broader encodings and bounded variable-period/resource qualification; retain project-preserving rejection and no silent demo rebuild.
 - 🟠 [Next] **Device lifecycle:** serialized start/stop/restart, unplug/default-device changes, suspension/resume, audio-thread panic containment where possible, and explicit stopped/recovering/faulted states.
 - 🟠 [Next] **Regression infrastructure:** property tests, randomized partitions/seeds, deterministic PCM/event fixtures, queue saturation, long-session soak, and known failing cases promoted to permanent tests.
 - 🟠 [Next] **Release hygiene:** remove existing compiler/Clippy warnings, then enforce a warning-clean baseline for maintained targets; lock dependencies and record toolchain changes with benchmark results.
@@ -440,8 +473,11 @@ Current verification commands:
 cargo fmt --all --check
 cargo test --workspace
 cargo clippy --workspace --all-targets
+npm run test:clock
 npm run test:midi
 npm run test:mixer
+npm run test:transport
+npm run test:output
 npm run build
 ```
 

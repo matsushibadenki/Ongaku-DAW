@@ -374,13 +374,17 @@ impl Project {
         note_id: Option<u64>,
     ) -> Result<(), AudioError> {
         let grid = match action {
-            "quantize" if [4, 8, 16, 32].contains(&amount) => {
-                (f64::from(self.sample_rate) * 60.0 / self.tempo_bpm * 4.0 / f64::from(amount))
-                    .round()
-                    .max(1.0) as u64
-            }
-            "transpose" if (-24..=24).contains(&amount) => 1,
-            "delete" if note_id.is_some() => 1,
+            "quantize" if [4, 8, 16, 32].contains(&amount) => Some(
+                daw_core::musical_grid::MusicalGrid::new(
+                    self.sample_rate,
+                    self.tempo_bpm,
+                    u8::try_from(amount)
+                        .map_err(|_| AudioError::InvalidConfig("invalid MIDI grid denominator"))?,
+                )
+                .ok_or(AudioError::InvalidConfig("invalid MIDI grid"))?,
+            ),
+            "transpose" if (-24..=24).contains(&amount) => None,
+            "delete" if note_id.is_some() => None,
             _ => return Err(AudioError::Backend("invalid MIDI edit".into())),
         };
         let clip = self
@@ -405,7 +409,7 @@ impl Project {
             if action == "transpose" {
                 note.key = (i32::from(note.key) + amount).clamp(0, 127) as u8;
             } else {
-                let snapped = note.start.0.saturating_add(grid / 2) / grid * grid;
+                let snapped = grid.map_or(note.start, |grid| grid.snap(note.start)).0;
                 note.start = SamplePosition(snapped.min(clip.duration_samples.saturating_sub(1)));
                 note.duration_samples = note
                     .duration_samples
@@ -798,3 +802,53 @@ mod tests {
 
 #[cfg(test)]
 mod streaming_tests;
+
+#[cfg(test)]
+mod clock_grid_regression {
+    use super::*;
+
+    #[test]
+    fn musical_quantize_preserves_exact_beats_at_fractional_grid_periods() {
+        let mut project = Project::demo(44_100).unwrap();
+        let note = &mut project.tracks[3].midi_clips[0].notes[0];
+        note.start = SamplePosition(88_200);
+        let before = *note;
+        project
+            .edit_midi_clip(TrackId(4), 4_100, "quantize", 16, Some(4_000))
+            .unwrap();
+        let after = project.tracks[3].midi_clips[0]
+            .notes
+            .iter()
+            .find(|note| note.id == 4_000)
+            .unwrap();
+        assert_eq!(*after, before); // Former rounded-width multiples shifted this by 8 samples.
+        let snapshot = project.snapshot();
+        project
+            .edit_midi_clip(TrackId(4), 4_100, "quantize", 16, Some(4_000))
+            .unwrap();
+        assert_eq!(project.snapshot(), snapshot);
+    }
+
+    #[test]
+    fn legacy_quantize_uses_exact_tempo_grid_at_half_sample_boundary() {
+        let mut project = Project::demo(48_000).unwrap();
+        // Exact binary tempo gives a sixteenth-note width just below 1800.5.
+        // The old multiply/divide float formula rounded it to 1801 instead.
+        project.tempo_bpm = 399.888_919_744_515_4;
+        let note = &mut project.tracks[3].midi_clips[0].notes[0];
+        note.start = SamplePosition(1_900);
+        let expected_duration = note.duration_samples;
+        let expected_velocity = note.velocity.to_bits();
+        project
+            .edit_midi_clip(TrackId(4), 4_100, "quantize", 16, Some(4_000))
+            .unwrap();
+        let note = project.tracks[3].midi_clips[0]
+            .notes
+            .iter()
+            .find(|note| note.id == 4_000)
+            .unwrap();
+        assert_eq!(note.start.0, 1_800);
+        assert_eq!(note.duration_samples, expected_duration);
+        assert_eq!(note.velocity.to_bits(), expected_velocity);
+    }
+}

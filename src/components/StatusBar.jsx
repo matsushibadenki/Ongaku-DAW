@@ -1,3 +1,4 @@
+import { outputFramesText } from "../utils/output-metrics.js";
 import { Icon } from "./Icons.jsx";
 import { transportStatusHelp } from "../utils/transport-status.js";
 
@@ -17,7 +18,7 @@ export function StatusBar({ t, config, metrics, running, previewMode, publicatio
         <span>{previewMode ? t.previewMode : t.nativeMode}</span>
         <span>{config.sampleRate.toLocaleString()} Hz</span>
         <span>{config.channels} ch</span>
-        <span>{config.bufferSize} spl</span>
+        <span title={`${t.outputFramesHelp} · ${outputFramesText(metrics?.output)}`}>{config.bufferSize} spl</span>
       </p>
       <p aria-live="polite">
         {label ? <span className="stream-readiness" data-state={state} title={detail} aria-label={detail} role="status">
@@ -25,7 +26,7 @@ export function StatusBar({ t, config, metrics, running, previewMode, publicatio
         </span> : null}
         <span className="transport-command-status" title={revisionHelp}>{t.audioRevision} {publicationStatus?.engine ? `${publicationStatus.engine.adoptedRevision}/${publicationStatus.engine.acceptedRevision}` : "—"}{publicationStatus?.preparation?.pending ? " …" : ""}</span>
         <span>{t.cpu} {running ? cpu : "—"}</span>
-        <span>{t.xruns} {metrics?.xrunCount ?? 0}</span>
+        <span title={t.processTimingHelp}>{t.processMisses} {metrics?.processDeadlineMissCount ?? metrics?.xrunCount ?? 0}</span>
         <span>{t.callbacks} {metrics?.callbackCount?.toLocaleString() ?? "—"}</span>
       </p>
     </footer>

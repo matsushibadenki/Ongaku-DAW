@@ -28,6 +28,10 @@ pub struct MusicalPosition {
 }
 
 impl MusicalPosition {
+    /// Converts an absolute signature-relative tick position, rounding nearest
+    /// with ties upward and saturating at the maximum sample position.
+    /// Finite tempo is clamped to 20..400 BPM; non-finite tempo uses 120 BPM.
+    /// Beat/tick overflow carries arithmetically instead of being clipped.
     #[must_use]
     pub fn to_sample(
         self,
@@ -46,15 +50,40 @@ impl MusicalPosition {
         } else {
             4
         };
-        let beats_per_bar = f64::from(numerator);
-        let beat_units = f64::from(self.bar) * beats_per_bar
-            + f64::from(self.beat)
-            + f64::from(self.tick) / f64::from(TICKS_PER_BEAT);
-        let quarter_note_scale = 4.0 / f64::from(denominator);
-        let seconds = beat_units * quarter_note_scale * 60.0 / tempo_bpm;
-        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-        SamplePosition((seconds * f64::from(sample_rate)).round().max(0.0) as u64)
+        // Preserve the exact finite binary tempo supplied by the document. Form the
+        // musical position in ticks before division so long timelines lose no bits.
+        let ticks = (u128::from(self.bar) * u128::from(numerator) + u128::from(self.beat))
+            * u128::from(TICKS_PER_BEAT)
+            + u128::from(self.tick);
+        let numerator = ticks * u128::from(sample_rate) * 240;
+        let bits = tempo_bpm.to_bits();
+        let significand = u128::from((bits & ((1_u64 << 52) - 1)) | (1_u64 << 52));
+        // Clamped 20..400 BPM is normal and has binary exponent -48..-44.
+        let exponent = u32::try_from((bits >> 52) & 0x7ff).unwrap_or(0);
+        let shift = 1075 - exponent;
+        let divisor = u128::from(TICKS_PER_BEAT) * u128::from(denominator) * significand;
+        SamplePosition(scaled_ratio_to_sample(numerator, divisor, shift))
     }
+}
+
+// Evaluate numerator * 2^shift / divisor with nearest, ties-up rounding.
+// Doubling the quotient/remainder avoids an overflowing shifted numerator.
+// All intermediates are bounded by the public input widths and clamped tempo.
+fn scaled_ratio_to_sample(numerator: u128, divisor: u128, shift: u32) -> u64 {
+    let mut quotient = numerator / divisor;
+    let mut remainder = numerator % divisor;
+    for _ in 0..shift {
+        if quotient > u128::from(u64::MAX) / 2 {
+            return u64::MAX;
+        }
+        remainder *= 2;
+        quotient = quotient * 2 + remainder / divisor;
+        remainder %= divisor;
+    }
+    if remainder >= divisor.div_ceil(2) {
+        quotient += 1;
+    }
+    u64::try_from(quotient).unwrap_or(u64::MAX)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -285,3 +314,7 @@ mod p0_regressions {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "clock_tests.rs"]
+mod clock_tests;

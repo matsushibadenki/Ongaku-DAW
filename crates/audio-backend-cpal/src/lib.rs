@@ -1,9 +1,16 @@
 //! CPAL adapter. No CPAL type crosses this crate's public boundary.
 
+#![cfg_attr(test, allow(unsafe_code))]
+
+mod boundary;
+mod negotiation;
+
 use audio_backend::{AudioBackend, AudioCallback, AudioOutputStream};
-use audio_types::{AudioConfig, AudioDeviceInfo, AudioError};
+use audio_types::{
+    AudioConfig, AudioDeviceInfo, AudioError, OutputConfiguration, OutputSampleFormat,
+};
 use cpal::{
-    BufferSize, SampleFormat, SampleRate, Stream, StreamConfig,
+    BufferSize, SampleRate, Stream, StreamConfig,
     traits::{DeviceTrait, HostTrait, StreamTrait},
 };
 
@@ -36,11 +43,25 @@ impl AudioBackend for CpalAudioBackend {
             .default_output_device()
             .ok_or_else(|| AudioError::Backend("no default output device is available".into()))?;
         let config = device.default_output_config().map_err(backend_error)?;
-        Ok(AudioConfig {
-            sample_rate: config.sample_rate(),
-            channels: config.channels(),
-            buffer_size: 128,
-        })
+        let ranges = device
+            .supported_output_configs()
+            .map_err(backend_error)?
+            .collect::<Vec<_>>();
+        negotiation::default_config(&ranges, config.sample_rate(), config.channels())
+    }
+
+    fn validate_output_config(
+        &self,
+        device_id: Option<&str>,
+        config: AudioConfig,
+    ) -> Result<(), AudioError> {
+        config.validate()?;
+        let device = select_device(&cpal::default_host(), device_id)?;
+        let ranges = device
+            .supported_output_configs()
+            .map_err(backend_error)?
+            .collect::<Vec<_>>();
+        negotiation::select(&ranges, config).map(|_| ())
     }
 
     fn open_output(
@@ -52,10 +73,18 @@ impl AudioBackend for CpalAudioBackend {
         let config = config.validate()?;
         let host = cpal::default_host();
         let device = select_device(&host, device_id)?;
-        let sample_format = device
-            .default_output_config()
+        let ranges = device
+            .supported_output_configs()
             .map_err(backend_error)?
-            .sample_format();
+            .collect::<Vec<_>>();
+        let selection = negotiation::select(&ranges, config)?;
+        let output = OutputConfiguration {
+            device_id: device.id().map_err(backend_error)?.to_string(),
+            requested: config,
+            validated: config,
+            sample_format: selection.format,
+            advertised_buffer_range: selection.buffer_range,
+        };
         let stream_config = StreamConfig {
             channels: config.channels,
             sample_rate: config.sample_rate as SampleRate,
@@ -68,17 +97,21 @@ impl AudioBackend for CpalAudioBackend {
             }
         };
 
-        let stream = match sample_format {
-            SampleFormat::F32 => build_f32_stream(&device, stream_config, callback, error_callback),
-            SampleFormat::I16 => build_i16_stream(&device, stream_config, callback, error_callback),
-            SampleFormat::U16 => build_u16_stream(&device, stream_config, callback, error_callback),
-            other => Err(AudioError::Backend(format!(
-                "unsupported output sample format: {other:?}"
-            ))),
+        let stream = match selection.format {
+            OutputSampleFormat::F32 => {
+                build_f32_stream(&device, stream_config, callback, error_callback)
+            }
+            OutputSampleFormat::I16 => {
+                build_converted_stream::<i16, _>(&device, stream_config, callback, error_callback)
+            }
+            OutputSampleFormat::U16 => {
+                build_converted_stream::<u16, _>(&device, stream_config, callback, error_callback)
+            }
         }?;
         Ok(Box::new(CpalOutputStream {
             stream,
             running: false,
+            output,
         }))
     }
 }
@@ -105,41 +138,13 @@ fn build_f32_stream<E>(
 where
     E: FnMut(cpal::Error) + Send + 'static,
 {
+    let observed_config = boundary_config(&config)?;
+    let sink = callback.event_sink();
     device
         .build_output_stream(
             config,
-            move |data: &mut [f32], _| callback.process(data),
-            error_callback,
-            None,
-        )
-        .map_err(backend_error)
-}
-
-#[allow(clippy::cast_possible_truncation)]
-fn build_i16_stream<E>(
-    device: &cpal::Device,
-    config: StreamConfig,
-    mut callback: Box<dyn AudioCallback>,
-    error_callback: E,
-) -> Result<Stream, AudioError>
-where
-    E: FnMut(cpal::Error) + Send + 'static,
-{
-    let capacity = config.channels as usize * buffer_capacity(&config);
-    let mut scratch = vec![0.0_f32; capacity];
-    device
-        .build_output_stream(
-            config,
-            move |data: &mut [i16], _| {
-                if data.len() > scratch.len() {
-                    data.fill(0);
-                    return;
-                }
-                let buffer = &mut scratch[..data.len()];
-                callback.process(buffer);
-                for (output, sample) in data.iter_mut().zip(buffer.iter().copied()) {
-                    *output = (sample.clamp(-1.0, 1.0) * f32::from(i16::MAX)) as i16;
-                }
+            move |data: &mut [f32], _| {
+                boundary::process_f32(&mut *callback, observed_config, data, sink.as_deref());
             },
             error_callback,
             None,
@@ -147,51 +152,58 @@ where
         .map_err(backend_error)
 }
 
-#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-fn build_u16_stream<E>(
+fn build_converted_stream<T, E>(
     device: &cpal::Device,
     config: StreamConfig,
-    mut callback: Box<dyn AudioCallback>,
+    callback: Box<dyn AudioCallback>,
     error_callback: E,
 ) -> Result<Stream, AudioError>
 where
+    T: cpal::SizedSample + cpal::FromSample<f32> + Send + 'static,
     E: FnMut(cpal::Error) + Send + 'static,
 {
-    let capacity = config.channels as usize * buffer_capacity(&config);
-    let mut scratch = vec![0.0_f32; capacity];
+    let observed_config = boundary_config(&config)?;
+    let channels = usize::from(config.channels);
+    let capacity = channels
+        .checked_mul(observed_config.buffer_size as usize)
+        .ok_or(AudioError::InvalidConfig(
+            "output scratch capacity overflow",
+        ))?;
+    let mut adapter = boundary::ConvertedOutput::<T>::new(callback, observed_config, capacity)?;
     device
         .build_output_stream(
             config,
-            move |data: &mut [u16], _| {
-                if data.len() > scratch.len() {
-                    data.fill(u16::MAX / 2);
-                    return;
-                }
-                let buffer = &mut scratch[..data.len()];
-                callback.process(buffer);
-                for (output, sample) in data.iter_mut().zip(buffer.iter().copied()) {
-                    *output = ((sample.clamp(-1.0, 1.0) * 0.5 + 0.5) * f32::from(u16::MAX)) as u16;
-                }
-            },
+            move |data: &mut [T], _| adapter.process(data),
             error_callback,
             None,
         )
         .map_err(backend_error)
 }
 
-fn buffer_capacity(config: &StreamConfig) -> usize {
-    match config.buffer_size {
-        BufferSize::Fixed(frames) => frames as usize,
-        BufferSize::Default => 4_096,
+fn boundary_config(config: &StreamConfig) -> Result<AudioConfig, AudioError> {
+    let BufferSize::Fixed(frames) = config.buffer_size else {
+        return Err(AudioError::InvalidConfig(
+            "output observation requires an explicit fixed-buffer request",
+        ));
+    };
+    AudioConfig {
+        channels: config.channels,
+        sample_rate: config.sample_rate,
+        buffer_size: frames,
     }
+    .validate()
 }
 
 struct CpalOutputStream {
     stream: Stream,
     running: bool,
+    output: OutputConfiguration,
 }
 
 impl AudioOutputStream for CpalOutputStream {
+    fn output_configuration(&self) -> Option<OutputConfiguration> {
+        Some(self.output.clone())
+    }
     fn start(&mut self) -> Result<(), AudioError> {
         if !self.running {
             self.stream.play().map_err(backend_error)?;

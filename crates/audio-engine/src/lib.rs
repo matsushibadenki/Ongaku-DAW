@@ -13,6 +13,7 @@ pub use transport_protocol::{
     TransportCommandResult, TransportCommandState, TransportCommandStatus, TransportProtocolStatus,
 };
 mod metrics;
+mod output_metrics;
 mod pending;
 mod publication;
 use pending::PendingPublications;
