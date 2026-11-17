@@ -1,3 +1,4 @@
+import { createMusicalGrid } from './musical-grid.js';
 import { applyNoteSelection } from './midi.js';
 
 export const midiClipKey = (trackId, clipId) => `${trackId}:${clipId}`;
@@ -20,7 +21,7 @@ export function editProjectMidiNotes(project, targets, edit) {
   const sources = midiSources(project);
   const view = buildMidiView(sources, project.lengthSamples);
   const ids = targets.map(midiNoteKey);
-  const grid = Math.max(1, Math.round(project.sampleRate * 60 / project.tempoBpm * 4 / (edit.division ?? 16)));
+  const grid = edit.type === 'quantize' ? createMusicalGrid(project.sampleRate, project.tempoBpm, edit.division) : 1;
   const updated = applyNoteSelection(view, ids, edit, grid);
   const byId = new Map(updated.map(note => [note.id, note]));
   const result = structuredClone(project);

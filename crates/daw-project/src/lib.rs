@@ -375,13 +375,10 @@ impl Project {
     ) -> Result<(), AudioError> {
         let grid = match action {
             "quantize" if [4, 8, 16, 32].contains(&amount) => Some(
-                daw_core::musical_grid::MusicalGrid::new(
-                    self.sample_rate,
-                    self.tempo_bpm,
-                    u8::try_from(amount)
+                self.quantize_grid(
+                    u32::try_from(amount)
                         .map_err(|_| AudioError::InvalidConfig("invalid MIDI grid denominator"))?,
-                )
-                .ok_or(AudioError::InvalidConfig("invalid MIDI grid"))?,
+                )?,
             ),
             "transpose" if (-24..=24).contains(&amount) => None,
             "delete" if note_id.is_some() => None,
@@ -852,3 +849,6 @@ mod clock_grid_regression {
         assert_eq!(note.velocity.to_bits(), expected_velocity);
     }
 }
+
+#[cfg(test)]
+mod quantize_tests;

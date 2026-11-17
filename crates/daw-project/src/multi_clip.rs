@@ -109,18 +109,15 @@ impl Project {
             },
             other => other,
         };
+        let grid = if let MidiSelectionEdit::Quantize { division } = edit {
+            Some(self.quantize_grid(division)?)
+        } else {
+            None
+        };
         // Work on a candidate: invalid data in any clip leaves every other clip untouched.
         let mut candidate = self.clone();
         for ((track_id, clip_id), ids) in groups {
-            if let MidiSelectionEdit::Quantize { division } = edit {
-                if ![4, 8, 16, 32].contains(&division) {
-                    return Err(AudioError::InvalidConfig("unsupported quantize division"));
-                }
-                #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-                let grid = (f64::from(self.sample_rate) * 60.0 / self.tempo_bpm * 4.0
-                    / f64::from(division))
-                .round()
-                .max(1.0) as u64;
+            if let Some(grid) = grid {
                 let clip = candidate
                     .track_mut(TrackId(track_id))?
                     .midi_clips
@@ -133,7 +130,7 @@ impl Project {
                         continue;
                     }
                     let absolute = clip.timeline_start.0.saturating_add(note.start.0);
-                    let snapped = absolute.saturating_add(grid / 2) / grid * grid;
+                    let snapped = grid.snap(SamplePosition(absolute)).0;
                     note.start = SamplePosition(
                         snapped
                             .saturating_sub(clip.timeline_start.0)

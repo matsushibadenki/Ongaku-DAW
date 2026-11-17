@@ -521,6 +521,17 @@ pub fn run() {
             application: Mutex::new(DawApplication::new_with_background_preparation()),
             backend: CpalAudioBackend,
         })
+        .setup(|app| {
+            let main = app
+                .config()
+                .app
+                .windows
+                .iter()
+                .find(|window| window.label == "main")
+                .ok_or("missing main window configuration")?;
+            tauri::WebviewWindowBuilder::from_config(app, main)?.build()?;
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             get_document_status,
             undo_project,

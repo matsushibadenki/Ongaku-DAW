@@ -34,3 +34,34 @@ test('preview fractional musical edit survives history and preview storage', asy
   await engineApi.undo();
   assert.deepEqual(await engineApi.loadProject(), after);
 });
+
+test('preview selections and cross-clip quantize share exact musical grids and preserve ownership', async () => {
+  const { engineApi } = await import('../src/api/engine.js');
+  await engineApi.configureProject(44100);
+  await engineApi.writeMidiNote(4, 4100, 4000, 88200, 1000, 60);
+  const aligned = structuredClone(await engineApi.project());
+  assert.deepEqual(await engineApi.editMidiSelection(4, 4100, [4000], {type:'quantize',division:16}), aligned);
+  await engineApi.addMidiClip(4, 1001, 100000);
+  await engineApi.addMidiClip(4, 60007, 40000);
+  for (const [clip,origin] of [[4101,1001],[4102,60007]]) {
+    await engineApi.writeMidiNote(4, clip, null, 88100-origin, 1000, 64);
+    await engineApi.writeMidiNote(4, clip, null, 0, 500, 67);
+  }
+  const targets = [4101,4102].map(clipId=>({trackId:4,clipId,noteId:1}));
+  const before = structuredClone(await engineApi.project());
+  const after = await engineApi.editMidiNotes(targets, {type:'quantize',division:16});
+  for (const clip of after.tracks[3].midiClips.slice(1)) {
+    const note = clip.notes.find(n=>n.id===1);
+    assert.equal(clip.timelineStart+note.start, 88200);
+    assert.equal(note.durationSamples, 1000);
+    assert.deepEqual(clip.notes.find(n=>n.id===2), before.tracks[3].midiClips.find(c=>c.id===clip.id).notes.find(n=>n.id===2));
+  }
+  assert.deepEqual(await engineApi.undo(), before);
+  assert.deepEqual(await engineApi.redo(), after);
+  await assert.rejects(engineApi.editMidiNotes(targets,{type:'quantize',division:7}));
+  await assert.rejects(engineApi.editMidiNotes([...targets,{...targets[0],noteId:999}],{type:'quantize',division:16}));
+  assert.deepEqual(await engineApi.project(), after);
+  await engineApi.saveProject(true);
+  await engineApi.undo();
+  assert.deepEqual(await engineApi.loadProject(), after);
+});

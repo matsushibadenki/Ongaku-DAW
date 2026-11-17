@@ -10,6 +10,17 @@ use events::{Controls, PreparedMixerEvents};
 pub use events::{MAX_MIXER_EVENTS_PER_TRACK, MixerChange, MixerEvent, validate_mixer_events};
 use std::sync::Arc;
 
+// Classify by bits so subnormals are removed before floating-point arithmetic.
+#[inline]
+fn clean_generated_sample(sample: f32) -> f32 {
+    let exponent = sample.to_bits() & 0x7f80_0000;
+    if exponent == 0 || exponent == 0x7f80_0000 {
+        0.0
+    } else {
+        sample
+    }
+}
+
 /// A prepared source whose output is derived from the engine Transport timeline.
 /// Implementations run in the audio callback and must not allocate, lock, or perform I/O.
 pub trait RealtimeTimelineSource: Send + std::any::Any + 'static {
@@ -774,13 +785,10 @@ impl AudioGraph {
                     }
                     for (channel, sample) in frame.iter_mut().enumerate() {
                         let sample_index = frame_offset * channels + channel;
-                        let generated = track.realtime_sample(sample_index)
-                            + track.timeline_sample(sample_index);
-                        let generated = if generated.is_finite() {
-                            generated
-                        } else {
-                            0.0
-                        };
+                        let generated = clean_generated_sample(
+                            clean_generated_sample(track.realtime_sample(sample_index))
+                                + clean_generated_sample(track.timeline_sample(sample_index)),
+                        );
                         let coefficient = track.mix_ramp.current[channel.min(2)];
                         // Keep PCM summation/multiplication order identical whether
                         // clips are resident or streamed, including mixed MIDI tracks.
@@ -792,11 +800,7 @@ impl AudioGraph {
                 self.runtime.master_ramp.advance();
                 for sample in frame {
                     let mastered = *sample * self.runtime.master_ramp.current[0];
-                    *sample = if mastered.is_nan() {
-                        0.0
-                    } else {
-                        mastered.clamp(-1.0, 1.0)
-                    };
+                    *sample = clean_generated_sample(mastered.clamp(-1.0, 1.0));
                 }
             }
             rendered_frames += block.len() / channels;
@@ -806,7 +810,7 @@ impl AudioGraph {
 
 #[cfg(test)]
 mod tests {
-    use super::{AudioGraph, Track, TrackId};
+    use super::{AudioGraph, RealtimeTimelineSource, Track, TrackId};
     use audio_clip::{AudioClip, PcmAsset};
     use audio_types::{AudioConfig, RealtimeAudioSource};
     use daw_core::{
@@ -898,6 +902,83 @@ mod tests {
             output[..count].copy_from_slice(&self.samples[self.cursor..self.cursor + count]);
             self.cursor += count;
             count
+        }
+    }
+
+    struct ConstantTimeline(f32);
+
+    impl RealtimeTimelineSource for ConstantTimeline {
+        fn sample_rate(&self) -> u32 {
+            48_000
+        }
+
+        fn channels(&self) -> u16 {
+            2
+        }
+
+        fn render_interleaved(&mut self, output: &mut [f32], _: &Transport, _: usize) {
+            output.fill(self.0);
+        }
+    }
+
+    #[test]
+    fn invalid_generated_samples_do_not_erase_the_other_source() {
+        for (realtime, timeline) in [
+            (f32::NAN, 0.25),
+            (0.25, f32::INFINITY),
+            (f32::NEG_INFINITY, 0.25),
+            (0.25, -f32::from_bits(1)),
+        ] {
+            let mut graph = AudioGraph::new(AudioConfig::DEFAULT).unwrap();
+            let mut track = Track::new(TrackId(1));
+            track
+                .set_realtime_source(Box::new(FixedSource {
+                    samples: vec![realtime; 2],
+                    cursor: 0,
+                }))
+                .unwrap();
+            track
+                .set_timeline_source(Box::new(ConstantTimeline(timeline)))
+                .unwrap();
+            graph.add_track(track).unwrap();
+            let mut transport = Transport::new(48_000);
+            transport.apply(TransportCommand::Play);
+            let mut output = [0.0; 2];
+            graph.process(&mut output, &transport);
+            assert_eq!(output.map(f32::to_bits), [0.25_f32.to_bits(); 2]);
+        }
+    }
+
+    #[test]
+    fn master_boundary_flushes_subnormal_tails_and_keeps_normal_samples() {
+        let mut graph = AudioGraph::new(AudioConfig::DEFAULT).unwrap();
+        let mut track = Track::new(TrackId(1));
+        let samples = (1_u32..=149)
+            .map(|exponent| {
+                if exponent <= 126 {
+                    f32::from_bits((127 - exponent) << 23)
+                } else {
+                    f32::from_bits(1 << (149 - exponent))
+                }
+            })
+            .collect::<Vec<_>>();
+        track.add_clip(clip(samples, 0));
+        graph.add_track(track).unwrap();
+        let mut transport = Transport::new(48_000);
+        transport.apply(TransportCommand::Play);
+        let mut output = [0.0; 298];
+        graph.process(&mut output, &transport);
+        for (index, frame) in output.chunks_exact(2).enumerate() {
+            let expected = if index < 126 {
+                f32::from_bits((126 - u32::try_from(index).unwrap()) << 23)
+            } else {
+                0.0
+            };
+            assert!(
+                frame
+                    .iter()
+                    .all(|sample| sample.to_bits() == expected.to_bits())
+            );
         }
     }
 

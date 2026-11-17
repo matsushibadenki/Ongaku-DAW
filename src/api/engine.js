@@ -241,7 +241,7 @@ function previewInvoke(command, args = {}) {
     case "edit_midi_selection": {
       const clip = preview.project.tracks.find(track => track.id === args.trackId)?.midiClips.find(clip => clip.id === args.clipId);
       if (!clip) throw new Error("MIDI clip was not found");
-      const grid = Math.max(1, Math.round(preview.project.sampleRate * 60 / preview.project.tempoBpm * 4 / (args.edit.division ?? 16)));
+      const grid = args.edit.type === "quantize" ? createMusicalGrid(preview.project.sampleRate, preview.project.tempoBpm, args.edit.division) : 1;
       clip.notes = applyNoteSelection(clip, args.noteIds, args.edit, grid);
       return Promise.resolve(structuredClone(preview.project));
     }

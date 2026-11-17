@@ -1604,3 +1604,68 @@ mod musical_quantize_tests {
         assert!(!app.document_status().can_undo);
     }
 }
+
+#[cfg(test)]
+mod cross_clip_quantize_tests {
+    use super::*;
+
+    fn check(app: &DawApplication, processor: &mut EngineProcessor) {
+        processor.process_block(&mut [0.0; 256]);
+        let status = app.publication_status(0);
+        let engine = status.engine.unwrap();
+        assert_eq!(Some(engine.adopted_revision), status.requested_revision);
+        assert_eq!(
+            engine.acknowledgements.last().unwrap().document_revision,
+            app.revision
+        );
+    }
+
+    #[test]
+    fn project_grid_history_storage_and_adoption_share_the_same_integer_positions() {
+        let config = AudioConfig {
+            sample_rate: 11_025,
+            ..AudioConfig::DEFAULT
+        };
+        let mut app = DawApplication::with_sample_rate(config.sample_rate).unwrap();
+        app.add_midi_clip(4, 1001, 30_000).unwrap();
+        app.add_midi_clip(4, 15_007, 20_000).unwrap();
+        for (clip, origin) in [(4101, 1001), (4102, 15_007)] {
+            app.write_midi_note(4, clip, None, 22_000 - origin, 500, 60)
+                .unwrap();
+        }
+        let targets = [4101, 4102].map(|clip_id| daw_project::MidiNoteTarget {
+            track_id: 4,
+            clip_id,
+            note_id: 1,
+        });
+        let before = app.project();
+        let (mut processor, control) = EngineProcessor::prepare(config).unwrap();
+        control
+            .submit_graph(EngineGraph::timeline(
+                app.project.build_audio_graph(config).unwrap(),
+            ))
+            .unwrap();
+        app.active_config = Some(config);
+        app.control = Some(control);
+        processor.process_block(&mut [0.0; 256]);
+        app.edit_midi_notes(&targets, MidiSelectionEdit::Quantize { division: 16 })
+            .unwrap();
+        let after = app.project();
+        for clip in &after.tracks[3].midi_clips[1..] {
+            assert_eq!(clip.timeline_start.0 + clip.notes[0].start.0, 22_050);
+            assert_eq!(clip.notes[0].duration_samples, 500);
+        }
+        check(&app, &mut processor);
+        assert_eq!(app.undo().unwrap(), before);
+        check(&app, &mut processor);
+        assert_eq!(app.redo().unwrap(), after);
+        check(&app, &mut processor);
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("project-grid.ongaku");
+        app.save_project(&path).unwrap();
+        app.undo().unwrap();
+        assert_eq!(app.load_project(&path).unwrap(), after);
+        assert!(!app.document_status().dirty);
+        assert!(app.publication_status(0).engine.is_none());
+    }
+}

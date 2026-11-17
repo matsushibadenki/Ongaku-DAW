@@ -54,7 +54,7 @@ export function applyNoteSelection(clip, ids, edit, grid = 1) {
   if (!['move', 'resize', 'delete', 'quantize'].includes(edit.type)) throw new Error('Invalid MIDI edit');
   if (['move', 'resize'].includes(edit.type) && !Number.isSafeInteger(edit.deltaSamples)) throw new Error('Invalid sample delta');
   if (edit.type === 'move' && !Number.isInteger(edit.semitones)) throw new Error('Invalid pitch delta');
-  if (edit.type === 'quantize' && (![4, 8, 16, 32].includes(edit.division) || !(grid >= 1))) throw new Error('Invalid quantize grid');
+  if (edit.type === 'quantize' && (![4, 8, 16, 32].includes(edit.division) || (typeof grid !== 'function' && !(grid >= 1)))) throw new Error('Invalid quantize grid');
   const limits = selectionLimits(selected, clip.durationSamples);
   const delta = edit.type === 'move' ? clamp(edit.deltaSamples, limits.left, limits.right)
     : edit.type === 'resize' ? clamp(edit.deltaSamples, limits.shorter, limits.right) : 0;
@@ -63,7 +63,7 @@ export function applyNoteSelection(clip, ids, edit, grid = 1) {
     if (!selectedIds.has(note.id)) return note;
     if (edit.type === 'move') return { ...note, start: note.start + delta, key: note.key + pitch };
     if (edit.type === 'resize') return { ...note, durationSamples: note.durationSamples + delta };
-    if (edit.type === 'quantize') return { ...note, start: clamp(snapSample(note.start, grid), note.minStart ?? 0, (note.maxEnd ?? clip.durationSamples) - note.durationSamples) };
+    if (edit.type === 'quantize') return { ...note, start: clamp(typeof grid === 'function' ? grid(note.start) : snapSample(note.start, grid), note.minStart ?? 0, (note.maxEnd ?? clip.durationSamples) - note.durationSamples) };
     return note;
   }).sort((a, b) => a.start - b.start || (typeof a.id === "number" ? a.id - b.id : a.id.localeCompare(b.id)));
 }

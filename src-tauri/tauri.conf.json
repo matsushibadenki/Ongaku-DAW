@@ -12,6 +12,8 @@
   "app": {
     "windows": [
       {
+        "label": "main",
+        "create": false,
         "title": "Ongaku DAW",
         "width": 1280,
         "height": 860,

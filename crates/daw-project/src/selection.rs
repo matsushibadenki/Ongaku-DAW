@@ -19,6 +19,22 @@ pub enum MidiSelectionEdit {
 }
 
 impl Project {
+    pub(super) fn quantize_grid(
+        &self,
+        division: u32,
+    ) -> Result<daw_core::musical_grid::MusicalGrid, AudioError> {
+        if ![4, 8, 16, 32].contains(&division) {
+            return Err(AudioError::InvalidConfig("unsupported quantize division"));
+        }
+        daw_core::musical_grid::MusicalGrid::new(
+            self.sample_rate,
+            self.tempo_bpm,
+            u8::try_from(division)
+                .map_err(|_| AudioError::InvalidConfig("unsupported quantize division"))?,
+        )
+        .ok_or(AudioError::InvalidConfig("invalid MIDI grid"))
+    }
+
     pub fn edit_midi_selection(
         &mut self,
         track_id: TrackId,
@@ -33,17 +49,9 @@ impl Project {
             ));
         }
         let grid = if let MidiSelectionEdit::Quantize { division } = edit {
-            if ![4, 8, 16, 32].contains(&division) {
-                return Err(AudioError::InvalidConfig("unsupported quantize division"));
-            }
-            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-            let grid = (f64::from(self.sample_rate) * 60.0 / self.tempo_bpm * 4.0
-                / f64::from(division))
-            .round()
-            .max(1.0) as u64;
-            grid
+            Some(self.quantize_grid(division)?)
         } else {
-            1
+            None
         };
         let clip = self
             .track_mut(track_id)?
@@ -86,7 +94,7 @@ impl Project {
                 }
                 MidiSelectionEdit::Quantize { .. } => {
                     // Preserve duration, even for a long note near the end of the clip.
-                    let snapped = note.start.0.saturating_add(grid / 2) / grid * grid;
+                    let snapped = grid.map_or(note.start, |grid| grid.snap(note.start)).0;
                     note.start =
                         SamplePosition(snapped.min(clip.duration_samples - note.duration_samples));
                 }

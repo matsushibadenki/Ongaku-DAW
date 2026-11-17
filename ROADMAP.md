@@ -37,6 +37,12 @@ Code completion and qualification are separate. A feature can have implemented c
 
 Compatibility with a product's proprietary presets, project binaries, or exact sound is a separate deliverable. Similar names or controls do not establish compatibility, and a reference implementation's planned features are not assumed to be working today.
 
+### Reference refresh — 2026-11-10
+
+The updated local Pro-Wave reference was reviewed at upstream `af32fce` (2026-11-09), using documentation and bundled screenshots, without copying application code or assets. Its documented additions include master inserts/convolution reverb, realtime bounce variants, send automation, mix-group/history tools, Hydrogen kits, interchange and partial GarageBand audio extraction. These are reference reports, not independently verified runtime behavior or Ongaku implementations. Screenshots predate the update; real-device and platform claims remain separate.
+
+🟢 [Done] Requirements/limitations review and roadmap reconciliation. See the self-contained [reference update record](docs/REFERENCE_UPDATE_2026-11-10.md), retained after deleting the reference directory. P0 remains ahead of feature parity: latency/tail ownership, render cancellation, truthful storage metrics and numerical robustness are prerequisites for the corresponding additions below.
+
 ## 2. Current implementation and qualification gaps
 
 | Area | Implemented baseline | Remaining qualification or scope |
@@ -262,9 +268,25 @@ Evidence and reproducible commands: [P0 validation record](docs/P0_VALIDATION.md
 - 🟠 [Next] Project-origin musical quantization across clips, tempo-map/tick-domain document model, inverse conversion and tempo-edit continuity. Explicit sample-grid selection commands retain their separate API.
 - ⭕️ [Pending] Physical timing, listening/loopback, external synchronization and endurance qualification.
 
+### Sixteenth implementation batch — exact selection and cross-clip quantization (2026-11-08)
+
+- 🟢 [Done] **Project-origin musical grids:** multi-note and cross-clip quantization now share the exact constant-tempo grid with legacy clip edits. Cross-clip targets snap their absolute sample positions before conversion back to clip-local positions; same-clip selection retains its existing local origin. Fractional-period drift is removed without changing command/schema shapes.
+- 🟢 [Done] **Atomic ownership and bounds:** validate division once and prepare the grid before candidate mutation. Composite note identity, selected/unselected ownership, duration, expression and clip bounds remain intact. Invalid selections cannot partially change other clips.
+- 🟢 [Done] **Preview and regression coverage:** exact BigInt preview grids; off-grid clip origins, aligned-note drift, fractional periods, repeated quantization, invalid-target atomicity, clip-edge clamping, graph adoption, Undo/Redo and save/load checks. Debug/Release each pass 185 workspace tests; ten JavaScript tests and the production build pass. See [quantization contract](docs/MULTI_CLIP_QUANTIZATION.md) and [P0 validation](docs/P0_VALIDATION.md).
+- 🟠 [Next] Tempo-map/tick-domain document model, inverse conversion, tempo-edit continuity and wider randomized interval/timing qualification. Physical output and device lifecycle work remains P0.
+- ⭕️ [Pending] Physical audio-clock drift, listening/loopback, hardware sync and endurance qualification.
+
+### Seventeenth implementation batch — mixer numerical boundaries (2026-11-14)
+
+- 🟢 [Done] **Generated-source isolation.** Classify sequential and timeline samples before adding them. A NaN or infinity in one source contributes silence for that sample while the healthy source remains audible.
+- 🟢 [Done] **Subnormal boundary policy.** Zero subnormal generated inputs, their sum and the clipped master output with portable bit classification. The mixer uses its established PCM summation order and master clipping.
+- 🟢 [Done] Workspace Debug passes 187 tests. Mixer and engine Release pass 61 tests, including source isolation, decaying PCM, graph continuity and callback allocation checks. See [P0 validation](docs/P0_VALIDATION.md).
+- 🟠 [Next] Qualify internal state in future feedback/convolution processors and measure callback cost under long-tail workloads.
+- ⭕️ [Pending] Physical loopback and cross-platform deadline measurements.
+
 ### Remaining P0 work
 
-- 🟠 [Next] **Clock oracle completion:** exact constant-tempo conversion, independent rational reference and edge/overflow/range tests are implemented in batch fourteen. Single-clip fractional musical grids are implemented in batch fifteen. Add a tempo-map/tick-domain document model, inverse conversion, project-origin musical quantization across clips and broader clip/event interval ownership tests.
+- 🟠 [Next] **Clock oracle completion:** exact constant-tempo conversion, independent rational reference and edge/overflow/range tests are implemented in batch fourteen. Exact selection/project-origin cross-clip grids are implemented in batch sixteen. Add a tempo-map/tick-domain document model, inverse conversion, tempo-map-aware editing and broader clip/event interval ownership tests.
 - 🟠 [Next] **MIDI lifetime completion:** sustain/controller chase, explicit all-notes-off/panic behavior, and continuity through live edits. Reference-instrument identity, overlap ownership, and deterministic stealing are complete within the scope above.
 - 🟠 [Next] **Graph continuity completion:** reference-instrument voices now survive compatible mixer, unrelated-note, reorder, and history publications. Position-addressed project streams now share immutable media/cache state across edit/history graphs. Per-callback stream admission is implemented in the tenth batch. Add general processor/effect-tail contracts and scheduled readiness/deadline guarantees; incompatible instruments retain explicit fresh-state behavior.
 - 🟠 [Next] **Parameter transitions completion:** timestamped external control, scheduled Transport/controller acknowledgements, graphical event lanes, plugin bypass ramps, and broader listening/zipper-noise qualification. Prepared Gain/Pan/Mute/Solo event timelines are implemented below. Track Gain/Pan/Mute/Solo and master Gain publication ramps are complete within the scope below; timeline positions are unchanged.
@@ -272,6 +294,7 @@ Evidence and reproducible commands: [P0 validation record](docs/P0_VALIDATION.md
 - 🟠 [Next] **Callback telemetry completion:** finer tail resolution, wake-up/physical driver-xrun counters, and off-thread telemetry export. Process/output-body timings and driver-notification/adapter-fault counters are separated in batch thirteen. Actual-block budgets and fixed-memory collection are implemented; histogram percentiles remain approximate.
 - 🟠 [Next] **Streaming discipline completion:** foundation seek generations, stale rejection, complete-frame delivery, bounded draining/read-ahead and synthetic stalled-read tests are implemented above. Project/loop/graph integration and shared-media ownership are implemented in the ninth batch. Complete-window readiness and transport holds are implemented in the tenth batch. Add scheduled deadline admission, multi-stream resource budgets/audits, interruptible I/O/recovery and measured storage-stall qualification.
 - 🟠 [Next] **Device negotiation completion:** advertised matching, failure-safe startup and requested/validated selection reporting are implemented in the twelfth batch. Delivered-period telemetry is implemented in batch thirteen. Add physical rate/scheduling telemetry, broader encodings and bounded variable-period/resource qualification; retain project-preserving rejection and no silent demo rebuild.
+- 🟠 [Next] **Numerical robustness:** generated-source and master boundary handling landed in batch seventeen. Add internal processor state policy, long decaying signal fixtures and parameter extremes; qualify thread-local numeric handling on each supported architecture without silently changing process-wide behavior. Future feedback/convolution processors require stable tails and bounded CPU before release; reference documentation is not measurement evidence.
 - 🟠 [Next] **Device lifecycle:** serialized start/stop/restart, unplug/default-device changes, suspension/resume, audio-thread panic containment where possible, and explicit stopped/recovering/faulted states.
 - 🟠 [Next] **Regression infrastructure:** property tests, randomized partitions/seeds, deterministic PCM/event fixtures, queue saturation, long-session soak, and known failing cases promoted to permanent tests.
 - 🟠 [Next] **Release hygiene:** remove existing compiler/Clippy warnings, then enforce a warning-clean baseline for maintained targets; lock dependencies and record toolchain changes with benchmark results.
@@ -307,7 +330,7 @@ Evidence and reproducible commands: [P0 validation record](docs/P0_VALIDATION.md
 - 🔴 [Later] **Arrangement navigation:** zoom, independent track heights, rulers in bars/beats/time/samples, markers, colored arrangement sections, selection ranges, play-from-selection/last-locate, and configurable snap modes.
 - 🔴 [Later] **Transport production tools:** metronome, count-in, tempo/signature maps, tempo ramps, pickup bars, tempo/event lists, project tuning, varispeed with explicit speed/pitch modes, and tuning-reference controls.
 - 🔴 [Later] **MIDI clip completion:** track-to-track drag, repeat/loop, automatic project extension, reversible trim source, tie/sustain-aware splits, and precise multi-clip transforms.
-- 🔴 [Later] **Offline render:** shared engine render graph, project/selection/track/stem output, tails, normalization, deterministic seeds, cancellation, and accurate frame counts; WAV 16/24-bit and 32-bit float first.
+- 🔴 [Later] **Offline render:** shared engine render graph, project/selection/track/stem output, tails, normalization, deterministic seeds, cancellation, and accurate frame counts; WAV 16/24-bit and 32-bit float first. In-place/join renders commit audio/media and document edits atomically as one history action; cancellation or disk failure preserves the original regions. Realtime hardware-path bounce must restore prior transport/loop/solo state without mutating concurrent user edits.
 - 🔴 [Later] **Dither/export:** independently implemented documented dither, sample-rate conversion, clipping/true-peak reports, realtime bounce for hardware paths, and stem alignment manifests.
 - ⭕️ [Pending] Multi-input physical recording, measured loopback alignment, monitoring latency, and file recovery after abrupt interruption on each qualified backend.
 
@@ -335,7 +358,7 @@ Evidence and reproducible commands: [P0 validation record](docs/P0_VALIDATION.md
 - 🔴 [Later] **Routing:** aux/bus/output/master strips, pre/post sends, sidechains, summing stacks, channel mapping, multi-output instruments, sends-on-fader, and cycle detection.
 - 🔴 [Later] **Mix control:** stereo balance versus true stereo pan, gain staging, pan laws, configurable insert/send slots, VCA, linked controls, attribute-based mix groups, and channel-strip presets.
 - 🔴 [Later] **Summing:** specify floating-point precision, reduction order, clipping policy, headroom, and non-finite handling. Evaluate 64-bit accumulation against the serial reference; do not label the current mixer 64-bit without implementation.
-- 🔴 [Later] **PDC:** latency contracts for every processor, sidechain/send/bus alignment, dynamic latency changes, bypass transitions, low-latency monitoring mode, and latency readouts.
+- 🔴 [Later] **PDC:** latency contracts for every processor, sidechain/send/bus alignment, dynamic latency changes, bypass transitions, low-latency monitoring mode, and latency readouts. Cover master inserts and convolution separately, preserving wet/dry and send alignment through graph updates and Undo/Redo.
 - 🔴 [Later] **Essential DSP:** parametric EQ and analyzer, compressor, noise gate, limiter, overdrive, utility gain/polarity, sample delay, basic delay, and algorithmic reverb.
 - 🔴 [Later] **Automation scope:** track and region lanes; gain, pan, sends, instrument/effect parameters, mute/bypass; stable parameter IDs; sample-position scheduling and latency policy.
 - 🔴 [Later] **Automation modes:** Read/Touch/Latch/Write, trim/relative modes, return time, overwrite boundaries, thinning, scaling, copy/paste, and explicit write-arm protection.
@@ -416,6 +439,7 @@ Each family needs a stable parameter model, patch migration, latency/tail/reset 
 
 ## 14. P9 — Workspace, performance, loops, video, and synchronization
 
+- 🟢 [Done] **Standalone main window.** Rust creates the main Tauri `WebviewWindow` at startup from its configured dimensions and label. Application state belongs to the Rust application.
 - 🔴 [Later] **Workspace:** Rust-owned panel layout/selection subscriptions, dock/undock/floating panels, saved workspaces, multi-monitor DPI, window restoration, and failure-safe reconnection.
 - 🔴 [Later] **wgpu renderer:** native waveform/timeline/piano-roll rendering, visible-range caching, resource limits, GPU loss/recreation, and an accessible WebView control surface. GPU loss must not interrupt audio.
 - 🔴 [Later] **Interface quality:** compact icon controls, contextual help, keyboard/screen-reader paths, predictable focus, safe-area handling, meaningful line breaks, Apple Human Interface Guidelines where applicable, platform conventions, and English/Japanese/Simplified Chinese parity.
@@ -432,8 +456,8 @@ Each family needs a stable parameter model, patch migration, latency/tail/reset 
 ## 15. P10 — Delivery, interchange, platforms, and release qualification
 
 - 🔴 [Later] **Audio delivery:** project/selection/region/track/stem bounce, in-place bounce, tail policies, loudness reports, metadata/BWF timestamps, bit depths, dither, and lossless/encoded formats with codec verification.
-- 🔴 [Later] **Interchange:** Standard MIDI Files, MusicXML, AAF and other documented interchange formats with tempo, position, offset, channel-map, and roundtrip fixtures.
-- 🔴 [Later] **Project compatibility:** investigate `.logicx` and other formats using independent, legally reviewable specifications/fixtures. Never depend on copied donor seeds, reference code, or proprietary sample libraries. Report unsupported data rather than silently approximating it.
+- 🔴 [Later] **Interchange:** Standard MIDI Files, MusicXML, AAF and other documented interchange formats with tempo, position, offset, channel-map, and roundtrip fixtures. Include SMPTE-timed MIDI (explicit 29.97 policy), markers, bank/program preservation and MusicXML export/import as separately qualified operations.
+- 🔴 [Later] **Project compatibility:** investigate `.logicx`, GarageBand `.band` bundles/archives and other formats using independent, legally reviewable specifications/fixtures. Never depend on copied donor seeds, reference code, or proprietary sample libraries. Report unsupported data rather than silently approximating it. Distinguish audio-only extraction from reconstruction of tempo, meter, MIDI and region placement; extracting media is not faithful session import.
 - 🔴 [Later] **Spatial delivery:** explicit multichannel bus model, surround/binaural monitoring, object metadata and ADM BWF after basic stereo stability/PDC gates pass.
 - 🔴 [Later] **macOS:** current Apple Silicon/Intel build policy, CoreAudio qualification, device permissions, signing/notarization, native menu/dialog/focus tests, and sleep/wake handling.
 - 🔴 [Later] **Windows:** WASAPI shared/exclusive and ASIO strategy, actual driver/buffer negotiation, signed installers, architecture policy, DPI/audio-device lifecycle tests, and loopback measurements.

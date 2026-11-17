@@ -404,3 +404,33 @@ The Rust grid uses no allocation, lock or I/O; all new conversion work runs on t
 🟠 [Next] Project-origin musical quantization across clips, tempo maps/tick-domain documents, inverse conversion and tempo-edit continuity. The current correction applies when requesting musical single-clip quantization; existing stored notes are never silently retimed.
 
 ⭕️ [Pending] Physical timing, listening/loopback, external sync and endurance. No Pro-Wave code/assets were read or reused.
+
+## Sixteenth batch — exact selection and cross-clip grids
+
+Date: 2026-11-08.
+
+🟢 [Done] Explicit multi-note and composite cross-clip quantization now share the prepared rational `MusicalGrid` with legacy single-clip edits. Validation is centralized and the grid is prepared once per command. Same-clip selection preserves its local origin; cross-clip editing snaps absolute project positions before converting back to each original clip. These APIs already accepted a musical division: no command or storage schema changes are needed. Previous current-contract wording that described them as explicit integer sample-grid APIs has been corrected.
+
+🟢 [Done] Two project regressions cover the 44.1 kHz fractional-period drift, two clips with non-grid origins, shared absolute grid positions, untouched unselected notes, preserved IDs/duration/key/velocity/channel, repeated edits, unsupported divisions, duplicate/missing target atomicity and legal edge clamping when an interior grid point is unavailable. An application regression at 11.025 kHz snaps notes in distinct clips to sample 22,050, checks document/adoption revision agreement through one-step Undo/Redo, and roundtrips storage. Whole-document load retains its intentional engine-stop/receipt-reset behavior.
+
+Native verification: **185 tests pass in each of Debug and Release**, including 15 core, 28 project, 27 application and the existing callback allocation/free, sustained MIDI, graph history, streaming and Transport suites. The only subsequent code edit moves a test helper to module scope to remove a new Clippy style warning; that application regression is rechecked in Debug/Release. Workspace Clippy retains existing project/MIDI warnings only, with no new selection/cross-clip/application warnings. Formatting, whitespace and local documentation links pass.
+
+Browser-preview control paths use the exact BigInt grid for both selection modes. A new preview test checks local aligned-note stability, composite ownership, exact project positions through Undo/Redo and storage, and rollback after invalid targets/divisions. `npm run test:clock` passes three cases; MIDI (one), mixer (two), Transport (two) and output (two) suites also pass: **ten JavaScript cases total**. The production Vite build passes. No rendered components or localization strings changed.
+
+Commands: Rust 1.93.0 `cargo test --workspace --offline`, `cargo test --workspace --release --offline`, `cargo clippy --workspace --all-targets --offline`, `cargo fmt --all --check`; Node 22.17.1 `npm run test:clock`, `npm run test:midi`, `npm run test:mixer`, `npm run test:transport`, `npm run test:output`, `npm run build`. Toolchain binaries are placed first on PATH. See [quantization contract](MULTI_CLIP_QUANTIZATION.md) for origin, rounding, clipping and lifecycle semantics.
+
+🟠 [Next] Tempo-map/tick-domain documents, inverse conversion, musical retiming during tempo edits and broader randomized interval qualification. No callback processing work was added by this batch; authoritative preparation and document edits remain in Rust.
+
+⭕️ [Pending] Physical clock/latency, listening/loopback, sync hardware and endurance qualification. No Pro-Wave code/assets were read or reused.
+
+## Seventeenth batch — mixer numerical boundaries (2026-11-14)
+
+🟢 [Done] Sequential and timeline sources each contribute zero for NaN, infinity or subnormal samples before addition. The generated sum is classified again to handle overflow and subnormal cancellation. Master output flushes subnormal values after clipping. These checks use portable bit classification and require no floating-point mode changes. The policy covers mixer boundaries. Internal processor states, intermediate PCM arithmetic and hardware output qualification remain separate work.
+
+The mixer regression injects NaN, positive and negative infinity, and a negative subnormal alongside a healthy source. The expected healthy samples remain bit-exact. A second regression renders a decaying PCM sequence across an internal block boundary and verifies the smallest normal sample and the transition to zero at subnormal magnitudes.
+
+Rust 1.93.0 verification passed. Workspace Debug ran 187 tests, and Release for the mixer and engine ran 61 tests. Targeted Clippy completed with the two existing project warnings. Commands used offline Cargo workspace tests, Release tests for `daw-mixer` and `audio-engine`, targeted Clippy and workspace formatting checks.
+
+🟠 [Next] Measure software callback cost with dense and long-tail workloads and define internal numerical handling as feedback and convolution processors are introduced.
+
+⭕️ [Pending] Physical playback, listening/loopback and cross-platform deadline measurements. Implementation and test fixtures were developed in Ongaku without Pro-Wave code or assets.
