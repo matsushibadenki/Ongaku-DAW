@@ -74,6 +74,7 @@ pub enum TransportCancelReason {
     Explicit = 1,
     Superseded,
     Stopped,
+    OutputUnavailable,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -162,6 +163,7 @@ impl Cell {
                 1 => Some(TransportCancelReason::Explicit),
                 2 => Some(TransportCancelReason::Superseded),
                 3 => Some(TransportCancelReason::Stopped),
+                4 => Some(TransportCancelReason::OutputUnavailable),
                 _ => None,
             },
             readiness: StreamReadiness {
@@ -218,6 +220,7 @@ impl Cell {
 }
 
 pub(super) struct TransportReceipts {
+    pub output_failed: AtomicBool,
     next: AtomicU64,
     pub accepted: AtomicU64,
     pub stop_dirty: AtomicBool,
@@ -242,6 +245,7 @@ impl Drop for ResultGuard<'_> {
 impl TransportReceipts {
     pub fn new() -> Self {
         Self {
+            output_failed: AtomicBool::new(false),
             next: AtomicU64::new(1),
             accepted: AtomicU64::new(0),
             stop_dirty: AtomicBool::new(false),
@@ -253,6 +257,9 @@ impl TransportReceipts {
         &self.cells[usize::try_from(id % TRANSPORT_HISTORY_CAPACITY as u64).unwrap_or(0)]
     }
     pub fn accept(&self, command: TransportCommand) -> Result<u64, AudioError> {
+        if self.output_failed.load(SeqCst) {
+            return Err(AudioError::InvalidState("output unavailable"));
+        }
         let id = self
             .next
             .fetch_update(SeqCst, SeqCst, |next| {

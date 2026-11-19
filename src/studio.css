@@ -201,3 +201,6 @@
 .studio-shell .app-preferences .metrics-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 .studio-shell .app-preferences .panel-header h2 { font-size: var(--text-sm); }
 .studio-shell .app-preferences .performance-details { grid-area: auto; }
+
+/* Keep recovery actions reachable above the compact browser overlay. */
+.studio-shell .error-banner { position: relative; z-index: 5; }

@@ -166,7 +166,7 @@ function previewInvoke(command, args = {}) {
   switch (command) {
     case "get_transport_command_status": return Promise.resolve(null);
     case "cancel_transport_command": return Promise.resolve(false);
-    case "get_graph_publication_status": return Promise.resolve({ documentRevision: 0, requestedRevision: null, engineEpoch: 0, engine: null, preparation: null, streamReadiness: null, transportCommands: null, outputConfiguration: null });
+    case "get_graph_publication_status": return Promise.resolve({ documentRevision: 0, requestedRevision: null, engineEpoch: 0, outputFaulted: false, engine: null, preparation: null, streamReadiness: null, transportCommands: null, outputConfiguration: null });
     case "list_output_devices": return Promise.resolve([{ id: "preview", name: "Preview Output", isDefault: true }]);
     case "default_output_config": return Promise.resolve({ sampleRate: 48_000, channels: 2, bufferSize: 128 });
     case "configure_project":

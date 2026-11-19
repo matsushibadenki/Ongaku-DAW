@@ -27,12 +27,19 @@ pub trait RealtimeEventSink: Send + Sync + 'static {
 pub trait AudioCallback: Send + 'static {
     /// Fills an interleaved `f32` output buffer. This method must not allocate or block.
     fn process(&mut self, output: &mut [f32]);
+    /// Serialized with process on the output thread when rendering is unavailable.
+    fn output_unavailable(&mut self) {}
     fn event_sink(&self) -> Option<Arc<dyn RealtimeEventSink>> {
         None
     }
 }
 
 pub trait AudioOutputStream: Send {
+    /// Sticky stream failure. A new stream is required after a true result.
+    fn is_faulted(&self) -> bool {
+        false
+    }
+
     fn output_configuration(&self) -> Option<OutputConfiguration> {
         None
     }

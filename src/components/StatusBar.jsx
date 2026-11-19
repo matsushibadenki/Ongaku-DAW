@@ -3,7 +3,7 @@ import { Icon } from "./Icons.jsx";
 import { transportStatusHelp } from "../utils/transport-status.js";
 
 export function StatusBar({ t, config, metrics, running, previewMode, publicationStatus }) {
-  const receipt = running && !previewMode ? publicationStatus?.streamReadiness : null;
+  const receipt = running && !previewMode && !publicationStatus?.outputFaulted ? publicationStatus?.streamReadiness : null;
   const current = receipt?.graphRevision === publicationStatus?.engine?.adoptedRevision;
   const state = current ? receipt?.readiness?.state : null;
   const labels = { ready: t.streamReady, waiting: t.streamWaiting, failed: t.streamFailed, capacityExceeded: t.streamCapacity };

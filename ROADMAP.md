@@ -284,6 +284,37 @@ Evidence and reproducible commands: [P0 validation record](docs/P0_VALIDATION.md
 - 🟠 [Next] Qualify internal state in future feedback/convolution processors and measure callback cost under long-tail workloads.
 - ⭕️ [Pending] Physical loopback and cross-platform deadline measurements.
 
+### Eighteenth implementation batch — failed output isolation and manual restart (2026-11-19)
+
+- 🟢 [Done] **Sticky output failure.** CPAL latches stream errors requiring rebuild. Later F32/I16/U16 callbacks emit format-correct silence through a fixed-storage guard and stop invoking the engine. Xrun, DeviceChanged and RealtimeDenied notifications keep the stream active and continue error accounting.
+- 🟢 [Done] **Observable lifecycle.** Rust reports Faulted and `outputFaulted` in publication status, rejects Transport and idempotent Start on a failed stream, and permits project/history/storage edits. Stop releases the failed stream on the control thread. Restart prepares the current document in a new engine epoch. Startup failures preserve document/history and commit no session.
+- 🟢 [Done] **Localized recovery.** English/Japanese/Simplified Chinese persistent fault notice, disabled Transport, reachable audio-stop action and accurate power state. The narrow-screen Browser overlay now leaves recovery controls accessible.
+- 🟢 [Done] **Evidence.** Debug/Release workspace suites each pass 191 tests, including error classification, callback allocation/free gates and history/adoption/startup failure fixtures. Ten JavaScript tests, production build and three-language desktop/mobile stop/restart browser fixtures pass. See [output lifecycle](docs/OUTPUT_CONFIGURATION.md) and [P0 validation](docs/P0_VALIDATION.md).
+- 🟠 [Next] Device enumeration refresh, automatic recovery policy, sleep/wake handling, pending-command shutdown outcomes and callback panic containment.
+- ⭕️ [Pending] Physical unplug/default-device changes, driver pause/destruction behavior, listening/loopback and cross-platform endurance.
+
+### Nineteenth implementation batch — engine frame integrity (2026-11-19)
+
+- 🟢 [Done] The engine rejects incomplete interleaved frames with full-buffer silence and a typed malformed-frame notification before command draining, graph adoption or rendering. The next valid block resumes processing.
+- 🟢 [Done] Engine Debug and Release each pass 48 tests, including malformed-block command/clock retention and existing graph/history, streaming and allocation/free gates.
+- 🟠 [Next] Continue device recovery, command shutdown outcomes and timing/resource qualification.
+- ⭕️ [Pending] Physical backend failure and loopback qualification.
+
+### Twentieth implementation batch — Stop on rejected engine blocks (2026-11-19)
+
+- 🟢 [Done] Direct engine callbacks apply the out-of-band Stop barrier and publish the stopped Transport snapshot even when rejecting an incomplete frame. Normal commands remain queued and the musical sample position holds.
+- 🟢 [Done] Engine Debug and Release each pass 49 tests, including a Play/Stop/malformed-block regression and the existing allocation, streaming and graph gates.
+- 🟠 [Next] Extend shutdown/failure outcomes across backend-level rejection and device loss.
+- ⭕️ [Pending] Physical backend and loopback qualification.
+
+### Twenty-first implementation batch — backend rejection and Transport settlement (2026-11-19)
+
+- 🟢 [Done] Backends can call a serialized, allocation-free `output_unavailable` hook when rejecting malformed/oversized output or quarantining failed callbacks. The engine applies safety Stop, freezes musical position and resolves queued/waiting Transport commands with `OutputUnavailable`. Stop receipts executed by the engine retain their applied result.
+- 🟢 [Done] Confirmed stream failure also settles retained unfinished receipts on the control thread, including when callbacks cease entirely. Applied results retain their outcome and partial application metadata remains available. The failed engine rejects new Transport acceptance until a new epoch is prepared.
+- 🟢 [Done] Failure-time Transport/result queries remain operational for UI polling. The output-unavailable reason is localized through the existing fault strings. Regression fixtures cover rejected buffers, absent callbacks, preserved applied results, terminal result stability, recovery and callback allocation/free behavior.
+- 🟠 [Next] Durable results across engine disposal, graph publication shutdown outcomes and physical device recovery qualification.
+- ⭕️ [Pending] Real-driver rejection, unplug races, listening/loopback and cross-platform endurance.
+
 ### Remaining P0 work
 
 - 🟠 [Next] **Clock oracle completion:** exact constant-tempo conversion, independent rational reference and edge/overflow/range tests are implemented in batch fourteen. Exact selection/project-origin cross-clip grids are implemented in batch sixteen. Add a tempo-map/tick-domain document model, inverse conversion, tempo-map-aware editing and broader clip/event interval ownership tests.
@@ -295,7 +326,7 @@ Evidence and reproducible commands: [P0 validation record](docs/P0_VALIDATION.md
 - 🟠 [Next] **Streaming discipline completion:** foundation seek generations, stale rejection, complete-frame delivery, bounded draining/read-ahead and synthetic stalled-read tests are implemented above. Project/loop/graph integration and shared-media ownership are implemented in the ninth batch. Complete-window readiness and transport holds are implemented in the tenth batch. Add scheduled deadline admission, multi-stream resource budgets/audits, interruptible I/O/recovery and measured storage-stall qualification.
 - 🟠 [Next] **Device negotiation completion:** advertised matching, failure-safe startup and requested/validated selection reporting are implemented in the twelfth batch. Delivered-period telemetry is implemented in batch thirteen. Add physical rate/scheduling telemetry, broader encodings and bounded variable-period/resource qualification; retain project-preserving rejection and no silent demo rebuild.
 - 🟠 [Next] **Numerical robustness:** generated-source and master boundary handling landed in batch seventeen. Add internal processor state policy, long decaying signal fixtures and parameter extremes; qualify thread-local numeric handling on each supported architecture without silently changing process-wide behavior. Future feedback/convolution processors require stable tails and bounded CPU before release; reference documentation is not measurement evidence.
-- 🟠 [Next] **Device lifecycle:** serialized start/stop/restart, unplug/default-device changes, suspension/resume, audio-thread panic containment where possible, and explicit stopped/recovering/faulted states.
+- 🟠 [Next] **Device lifecycle completion:** failed-stream callback isolation, observable Faulted state and manual stop/restart are implemented in batch eighteen. Add device enumeration/route refresh, automatic recovery, suspension/resume, panic containment and physical unplug qualification.
 - 🟠 [Next] **Regression infrastructure:** property tests, randomized partitions/seeds, deterministic PCM/event fixtures, queue saturation, long-session soak, and known failing cases promoted to permanent tests.
 - 🟠 [Next] **Release hygiene:** remove existing compiler/Clippy warnings, then enforce a warning-clean baseline for maintained targets; lock dependencies and record toolchain changes with benchmark results.
 - ⭕️ [Pending] Current-build hardware qualification on macOS, Windows, and Linux with independent loopback capture and an identified audio interface.

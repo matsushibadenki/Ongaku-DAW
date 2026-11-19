@@ -3,7 +3,7 @@ const stateLabels = {
   applied: "transportApplied", cancelPending: "transportCancelPending", canceled: "transportCanceled",
   failed: "transportFailed", capacityExceeded: "transportCapacity",
 };
-const reasonLabels = { explicit: "transportExplicit", superseded: "transportSuperseded", stopped: "transportStopped" };
+const reasonLabels = { explicit: "transportExplicit", superseded: "transportSuperseded", stopped: "transportStopped", outputUnavailable: "outputFaultTitle" };
 
 /** Describe one retained result; never attribute an older ID's state to the latest acceptance. */
 export function transportStatusHelp(protocol, t) {

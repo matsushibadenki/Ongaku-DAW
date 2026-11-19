@@ -4,6 +4,36 @@ use audio_types::{AudioConfig, AudioError, OutputFault};
 use cpal::{FromSample, Sample};
 use std::{marker::PhantomData, sync::Arc, time::Instant};
 
+/// Keeps a failed stream from advancing engine state on later callbacks.
+pub(super) struct FaultGuard {
+    callback: Box<dyn AudioCallback>,
+    faulted: Arc<std::sync::atomic::AtomicBool>,
+}
+impl FaultGuard {
+    pub fn new(
+        callback: Box<dyn AudioCallback>,
+        faulted: Arc<std::sync::atomic::AtomicBool>,
+    ) -> Self {
+        Self { callback, faulted }
+    }
+}
+impl AudioCallback for FaultGuard {
+    fn process(&mut self, output: &mut [f32]) {
+        if self.faulted.load(std::sync::atomic::Ordering::Acquire) {
+            output.fill(0.0);
+            self.callback.output_unavailable();
+        } else {
+            self.callback.process(output);
+        }
+    }
+    fn output_unavailable(&mut self) {
+        self.callback.output_unavailable();
+    }
+    fn event_sink(&self) -> Option<Arc<dyn RealtimeEventSink>> {
+        self.callback.event_sink()
+    }
+}
+
 struct Observation<'a> {
     sink: Option<&'a dyn RealtimeEventSink>,
     config: AudioConfig,
@@ -45,6 +75,7 @@ pub(super) fn process_f32(
     let channels = usize::from(config.channels);
     output.fill(0.0);
     if channels == 0 || !output.len().is_multiple_of(channels) {
+        callback.output_unavailable();
         report(sink, OutputFault::MalformedFrame);
         return;
     }
@@ -99,10 +130,12 @@ impl<T: Sample + FromSample<f32>> ConvertedOutput<T> {
             .len()
             .is_multiple_of(usize::from(self.config.channels))
         {
+            self.callback.output_unavailable();
             report(self.sink.as_deref(), OutputFault::MalformedFrame);
             return;
         }
         if output.len() > self.scratch.len() {
+            self.callback.output_unavailable();
             report(self.sink.as_deref(), OutputFault::CapacityExceeded);
             return;
         }
@@ -164,6 +197,7 @@ mod tests {
     }
     #[derive(Default)]
     struct Probe {
+        unavailable: AtomicUsize,
         calls: AtomicUsize,
         errors: AtomicUsize,
         observations: AtomicUsize,
@@ -203,6 +237,9 @@ mod tests {
         probe: Arc<Probe>,
     }
     impl AudioCallback for Source {
+        fn output_unavailable(&mut self) {
+            self.probe.unavailable.fetch_add(1, Ordering::Relaxed);
+        }
         fn process(&mut self, output: &mut [f32]) {
             self.probe.calls.fetch_add(1, Ordering::Relaxed);
             for (output, sample) in output.iter_mut().zip(self.samples) {
@@ -229,6 +266,57 @@ mod tests {
             ..AudioConfig::DEFAULT
         }
     }
+    #[test]
+    fn faulted_streams_silence_all_encodings_without_advancing_or_allocating() {
+        use std::sync::atomic::AtomicBool;
+        let faulted = Arc::new(AtomicBool::new(false));
+        let (callback, probe) = source(&[0.25, 0.25]);
+        let mut callback = FaultGuard::new(callback, faulted.clone());
+        let sink = callback.event_sink();
+        let mut f32_output = [1.0; 2];
+        realtime(|| process_f32(&mut callback, config(1), &mut f32_output, sink.as_deref()));
+        assert_eq!(f32_output.map(f32::to_bits), [0.25_f32.to_bits(); 2]);
+        faulted.store(true, Ordering::Release);
+        realtime(|| process_f32(&mut callback, config(1), &mut f32_output, sink.as_deref()));
+        assert_eq!(f32_output.map(f32::to_bits), [0; 2]);
+        assert_eq!(probe.calls.load(Ordering::Relaxed), 1);
+        assert_eq!(probe.observations.load(Ordering::Relaxed), 2);
+        assert_eq!(probe.unavailable.load(Ordering::Relaxed), 1);
+
+        let faulted = Arc::new(AtomicBool::new(false));
+        let (callback, probe) = source(&[0.25, 0.25]);
+        let mut adapter = ConvertedOutput::<i16>::new(
+            Box::new(FaultGuard::new(callback, faulted.clone())),
+            config(1),
+            2,
+        )
+        .unwrap();
+        let mut output = [0; 2];
+        realtime(|| adapter.process(&mut output));
+        assert!(output.iter().all(|sample| *sample > 0));
+        faulted.store(true, Ordering::Release);
+        realtime(|| adapter.process(&mut output));
+        assert_eq!(output, [0; 2]);
+        assert_eq!(probe.calls.load(Ordering::Relaxed), 1);
+
+        let faulted = Arc::new(AtomicBool::new(false));
+        let (callback, probe) = source(&[0.25, 0.25]);
+        let mut adapter = ConvertedOutput::<u16>::new(
+            Box::new(FaultGuard::new(callback, faulted.clone())),
+            config(1),
+            2,
+        )
+        .unwrap();
+        let mut output = [0; 2];
+        realtime(|| adapter.process(&mut output));
+        assert!(output.iter().all(|sample| *sample > 32768));
+        faulted.store(true, Ordering::Release);
+        realtime(|| adapter.process(&mut output));
+        assert_eq!(output, [32768; 2]);
+        realtime(|| adapter.process(&mut []));
+        assert_eq!(probe.calls.load(Ordering::Relaxed), 1);
+    }
+
     const SAMPLES: &[f32] = &[
         -2.0,
         -1.0,
@@ -285,6 +373,7 @@ mod tests {
         assert_eq!(probe.requested.load(Ordering::Relaxed), 2);
         assert_eq!(probe.malformed.load(Ordering::Relaxed), 1);
         assert_eq!(probe.capacity.load(Ordering::Relaxed), 1);
+        assert_eq!(probe.unavailable.load(Ordering::Relaxed), 2);
         let mut valid = [1; 4];
         realtime(|| adapter.process(&mut valid));
         assert_eq!(valid, [49152; 4]);

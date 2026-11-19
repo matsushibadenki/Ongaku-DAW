@@ -39,3 +39,13 @@ test("Transport hover text correlates IDs and distinguishes cancellation after a
     assert.equal(transportStatusHelp(null, t), "");
   }
 });
+
+test("output-unavailable results explain cancellation in every language", () => {
+  for (const t of Object.values(messages)) {
+    const help = transportStatusHelp({ latest: { commandId: 7, result: {
+      commandId: 7, state: "canceled", cancelReason: "outputUnavailable", effectApplied: false,
+    }}}, t);
+    assert(help.includes(t.outputFaultTitle));
+    assert(help.includes(t.transportCanceled));
+  }
+});

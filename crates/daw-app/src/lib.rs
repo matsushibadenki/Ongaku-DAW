@@ -20,6 +20,7 @@ pub enum EngineState {
     #[default]
     Stopped,
     Running,
+    Faulted,
 }
 
 #[derive(Clone, Debug, serde::Serialize)]
@@ -34,6 +35,7 @@ pub struct DocumentStatus {
 #[derive(Debug, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PublicationStatus {
+    pub output_faulted: bool,
     pub output_configuration: Option<audio_types::OutputConfiguration>,
     pub transport_commands: Option<audio_engine::TransportProtocolStatus>,
     pub stream_readiness: Option<audio_engine::StreamReadinessSnapshot>,
@@ -128,6 +130,11 @@ impl DawApplication {
         device_id: Option<&str>,
         config: AudioConfig,
     ) -> Result<(), AudioError> {
+        if self.output_faulted() {
+            return Err(AudioError::InvalidState(
+                "output stream failed; stop and restart the engine",
+            ));
+        }
         if self.state == EngineState::Running {
             if self.active_config != Some(config) {
                 return Err(AudioError::InvalidState(
@@ -180,6 +187,11 @@ impl DawApplication {
             ));
         }
         stream.start()?;
+        if stream.is_faulted() {
+            return Err(AudioError::InvalidState(
+                "output stream failed during startup",
+            ));
+        }
         self.output_configuration = output_configuration;
         self.stream = Some(stream);
         self.control = Some(control);
@@ -235,11 +247,25 @@ impl DawApplication {
         id: u64,
     ) -> Result<audio_engine::TransportCommandStatus, AudioError> {
         self.check_transport_epoch(epoch)?;
-        self.control()?.transport_command_status(id)
+        let control = self
+            .control
+            .as_ref()
+            .ok_or(AudioError::InvalidState("engine is not running"))?;
+        if self.output_faulted() {
+            control.settle_output_failure();
+        }
+        control.transport_command_status(id)
     }
     pub fn cancel_transport_command(&self, epoch: u64, id: u64) -> Result<bool, AudioError> {
         self.check_transport_epoch(epoch)?;
-        self.control()?.cancel_transport_command(id)
+        let control = self
+            .control
+            .as_ref()
+            .ok_or(AudioError::InvalidState("engine is not running"))?;
+        if self.output_faulted() {
+            control.settle_output_failure();
+        }
+        control.cancel_transport_command(id)
     }
     fn check_transport_epoch(&self, epoch: u64) -> Result<(), AudioError> {
         if epoch == self.engine_epoch {
@@ -252,7 +278,14 @@ impl DawApplication {
     }
 
     pub fn transport(&self) -> Result<TransportSnapshot, AudioError> {
-        Ok(self.control()?.transport())
+        let control = self
+            .control
+            .as_ref()
+            .ok_or(AudioError::InvalidState("engine is not running"))?;
+        if self.output_faulted() {
+            control.settle_output_failure();
+        }
+        Ok(control.transport())
     }
 
     #[must_use]
@@ -532,11 +565,26 @@ impl DawApplication {
     }
 
     #[must_use]
-    pub const fn state(&self) -> EngineState {
-        self.state
+    pub fn state(&self) -> EngineState {
+        if self.output_faulted() {
+            EngineState::Faulted
+        } else {
+            self.state
+        }
+    }
+
+    fn output_faulted(&self) -> bool {
+        self.stream
+            .as_ref()
+            .is_some_and(|stream| stream.is_faulted())
     }
 
     fn control(&self) -> Result<&EngineControl, AudioError> {
+        if self.output_faulted() {
+            return Err(AudioError::InvalidState(
+                "output stream failed; stop and restart the engine",
+            ));
+        }
         self.control
             .as_ref()
             .ok_or(AudioError::InvalidState("engine is not running"))
@@ -544,12 +592,18 @@ impl DawApplication {
 
     #[must_use]
     pub fn publication_status(&self, after_revision: u64) -> PublicationStatus {
+        if self.output_faulted()
+            && let Some(control) = &self.control
+        {
+            control.settle_output_failure();
+        }
         let preparation = self.preparation.as_ref().map(PreparationService::status);
         let requested_revision = preparation
             .as_ref()
             .and_then(|status| status.published_revision)
             .or(self.requested_revision);
         PublicationStatus {
+            output_faulted: self.output_faulted(),
             output_configuration: self.output_configuration.clone(),
             transport_commands: self
                 .control
@@ -588,6 +642,9 @@ impl DawApplication {
         project: &Project,
         document_revision: u64,
     ) -> Result<Option<u64>, AudioError> {
+        if self.output_faulted() {
+            return Ok(self.requested_revision);
+        }
         let Some(config) = self.active_config else {
             return Ok(None);
         };
@@ -1669,3 +1726,6 @@ mod cross_clip_quantize_tests {
         assert!(app.publication_status(0).engine.is_none());
     }
 }
+
+#[cfg(test)]
+mod output_fault_tests;

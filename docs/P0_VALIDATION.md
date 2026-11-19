@@ -434,3 +434,59 @@ Rust 1.93.0 verification passed. Workspace Debug ran 187 tests, and Release for 
 🟠 [Next] Measure software callback cost with dense and long-tail workloads and define internal numerical handling as feedback and convolution processors are introduced.
 
 ⭕️ [Pending] Physical playback, listening/loopback and cross-platform deadline measurements. Implementation and test fixtures were developed in Ongaku without Pro-Wave code or assets.
+
+## Eighteenth batch — output failure and manual restart (2026-11-19)
+
+🟢 [Done] CPAL reports a sticky stream failure for errors requiring rebuild. Xrun, DeviceChanged and RealtimeDenied notifications remain active and counted. The fixed-storage callback guard stops calling the engine after observing failure, returning F32/I16 zero or U16 equilibrium silence. An already executing callback may complete before the flag is observed. The fixture exercises all three formats, normal/faulted/empty callbacks, continued adapter observations and zero callback allocations/frees.
+
+🟢 [Done] Application state and publication status expose Faulted/`outputFaulted`. Faulted Start/Transport reject, while document edits, Undo/Redo and save retain exact snapshots. Restart prepares the current document in a new engine epoch with matching graph-adoption/document revision and stale Transport ID rejection. Another fixture injects failure during Start and verifies that no session/epoch commits before a successful retry. Existing audio graph, sustained-note, ramp, streaming, history and receipt suites remain regression gates.
+
+Native verification passes **191 workspace tests in Debug and Release**, including 10 CPAL and 29 application tests. Workspace Clippy completes with existing project/MIDI warnings only. The final code-only reorder moves the backend error helper above the test module to remove a new Clippy warning, followed by CPAL Debug/Release rechecks and workspace Clippy. Formatting, whitespace and local documentation links pass.
+
+Node 22.17.1 MIDI, mixer, Transport, output and musical-clock suites pass **ten top-level cases**. The preview status regression now checks `outputFaulted: false`. The production Vite build passes after the final UI/CSS changes.
+
+| Browser QA | Result |
+| --- | --- |
+| Environment | Browser plugin not available. Cached Playwright Chromium used with local Vite at `http://127.0.0.1:5175/` |
+| Flow | Start audio, inject fault status, inspect notice/disabled Transport, stop via the notice, restart via power |
+| Languages | English, Japanese and Simplified Chinese each complete the flow |
+| Viewports | 1440×1000 desktop and 390×844 compact layout |
+| Failure found and fixed | Narrow-screen Browser panel intercepted clicks on the notice stop action. Raising the banner above the overlay restores access |
+| Checks | Page identity/content, no Vite overlay, clean warning/error console, fault power label/state, disabled Transport, enabled stop, cleared notice after stop and enabled Transport after restart |
+| Interaction evidence | Three successful stop operations and four starts, including the initial start. Screenshots inspected at `/tmp/output-fault-desktop.png` and `/tmp/output-fault-mobile.png` |
+
+Browser values are injected status fixtures. Native behavior is tested through callback/application fixtures. No physical device was disconnected during this validation. The UI uses its existing 100 ms polling, and source state stops advancing on callbacks that observe the failure flag.
+
+Commands use Rust 1.93.0 binaries first on PATH with offline workspace Debug/Release tests, `cargo clippy --workspace --all-targets --offline` and `cargo fmt --all --check`. JavaScript commands are `npm run test:clock`, `npm run test:midi`, `npm run test:mixer`, `npm run test:transport`, `npm run test:output` and `npm run build`. The local UI script is `/tmp/output-fault-ui.mjs` and screenshots remain outside the repository.
+
+🟠 [Next] Automatic recovery, device enumeration/route refresh, sleep/wake, pending-command shutdown outcomes and callback panic containment.
+
+⭕️ [Pending] Physical unplug/default-device changes, actual driver pause/destruction, listening/loopback and cross-platform endurance. Implementation uses Ongaku's contracts and independent fixtures.
+
+## Nineteenth batch — direct engine frame integrity (2026-11-19)
+
+🟢 [Done] Incomplete interleaved buffers are silenced and reported as a typed malformed-frame fault before engine commands, graph adoption and musical state advance. A regression queues Play, submits three samples to a stereo engine, checks silence and retained stopped position, then confirms that a complete block applies Play and advances by exactly two frames. CPAL retains its earlier boundary validation. Empty complete buffers retain their existing command behavior.
+
+Engine Debug and Release each pass 48 tests using Rust 1.93.0 offline Cargo. Targeted Clippy and formatting checks complete. Existing callback allocation/free, graph/history, streaming and Transport gates pass in these suites. Malformed calls increment adapter-fault metrics and are excluded from engine process timing.
+
+⭕️ [Pending] Physical device and loopback qualification.
+
+## Twentieth batch — safety Stop on rejected engine blocks (2026-11-19)
+
+🟢 [Done] The direct engine malformed-frame path now applies the existing out-of-band Stop barrier before returning silence and publishes the updated Transport snapshot. Regular commands remain queued. The regression starts playback, requests Stop, rejects a malformed stereo block and verifies that playback stops at the same sample and remains stopped on the next valid block. Engine Debug and Release each pass 49 tests. Targeted Clippy completes with existing project warnings, and formatting/whitespace checks pass.
+
+🟠 [Next] Backend-level rejected buffers and failed streams can prevent engine invocation entirely. Extend command shutdown outcomes for those lifecycle paths.
+
+⭕️ [Pending] Physical device and loopback qualification. Implementation and fixtures use Ongaku code.
+
+## Twenty-first batch — backend unavailable-output settlement (2026-11-19)
+
+🟢 [Done] A serialized callback hook handles backend malformed/capacity rejection and failed-stream callback gating without rendering. It applies the engine Stop barrier, holds sample position and resolves queued/waiting Transport requests as canceled with `OutputUnavailable`. Explicit cancellation retains its reason. Applied Stop receipts and existing terminal outcomes are preserved.
+
+🟢 [Done] Control-side failure settlement marks the epoch unavailable, rejects new acceptance and resolves retained unfinished receipts when callbacks cease. Atomic receipt guards coordinate with an in-flight writer, with retries through subsequent status service. Failure-time Transport/result queries use the retained control instead of rejecting the status poll. The existing application failure fixture verifies the stopped snapshot and output-unavailable result before restart, plus history/storage and epoch behavior.
+
+Regression coverage includes Play/Stop/backend rejection, no-callback settlement, preservation of previously applied commands, stable terminal results on later callbacks, fresh Play after transient rejection, F32/I16/U16 hook forwarding, malformed/capacity notifications and callback allocation/free instrumentation. The Transport tooltip maps the new cancellation reason to existing English/Japanese/Simplified Chinese output-fault text, covered by a three-language JavaScript test.
+
+🟠 [Next] Durable results across engine disposal and graph publication shutdown outcomes. Existing current-session retention and epoch invalidation still apply.
+
+⭕️ [Pending] Actual driver rejection/unplug races, physical loopback and cross-platform endurance. Ongaku contracts and independent fixtures were used throughout.

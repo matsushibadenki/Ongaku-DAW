@@ -21,6 +21,7 @@ export function App() {
   const [editorOpen, setEditorOpen] = useState(true);
   const t = messages[locale] ?? messages.en;
   const session = useDawSession(t.unavailable);
+  const outputFaulted = session.publicationStatus?.outputFaulted ?? false;
   const selectedTrack = session.project?.tracks.find((track) => track.id === selectedTrackId);
 
   const allSources = useMemo(() => midiSources(session.project), [session.project]);
@@ -132,10 +133,13 @@ export function App() {
         onToggleEditor={() => setEditorOpen((value) => !value)} />
       <div className={`studio-body${browserOpen ? " browser-open" : ""}`}>
       <main className={`workspace${inspectorOpen ? " has-inspector" : ""}${editorOpen ? " has-editor" : ""}`}>
-        {(session.error || session.timingWarning) && <div className={`error-banner${session.error ? "" : " timing-warning"}`} role={session.error ? "alert" : "status"}>
-          <strong>{session.error ? t.commandFailed : t.editTiming}</strong>
-          <span>{session.error || (session.timingWarning === "late" ? t.lateEditNotice : t.adoptionHistoryNotice)}</span>
-          <button type="button" onClick={() => session.error ? session.setError("") : session.dismissTimingWarning()}>{t.dismiss}</button></div>}
+        {(outputFaulted || session.error || session.timingWarning) && <div className={`error-banner${outputFaulted || session.error ? "" : " timing-warning"}`} role={outputFaulted || session.error ? "alert" : "status"}>
+          <strong>{outputFaulted ? t.outputFaultTitle : session.error ? t.commandFailed : t.editTiming}</strong>
+          <span>{outputFaulted ? t.outputFaultMessage : session.error || (session.timingWarning === "late" ? t.lateEditNotice : t.adoptionHistoryNotice)}</span>
+          <button type="button" disabled={outputFaulted && session.busy}
+            onClick={outputFaulted ? session.stopEngine : () => session.error ? session.setError("") : session.dismissTimingWarning()}>
+            {outputFaulted ? t.stopOutput : t.dismiss}
+          </button></div>}
         {inspectorOpen && <TrackInspector t={t} track={selectedTrack} session={session} />}
         <EditorMap t={t} session={session} onEditClips={editClips} selectedClipKeys={effectiveClipKeys} onSelectClip={selectClip} selectedTrackId={selectedTrackId} onSelectTrack={selectTrack} />
         {editorOpen && <div className="detail-region">

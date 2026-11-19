@@ -43,7 +43,33 @@ The report survives ordinary edits and Undo/Redo, clears when the engine stops, 
 - Empty, frame-aligned buffers are forwarded; the engine's zero-frame command/readiness policy remains intact.
 - Invalid samples report one aggregate backend error per affected block. Driver notifications and typed adapter faults now have separate counters and retain the existing aggregate backend-error counter; none is a physical driver-xrun measurement.
 
-Callback processing performs no allocation, free, resizing, decoding or I/O. The integer oversized-buffer policy is explicit silence plus an error, not transparent recovery or gap-free variable-period support. Metadata/control acknowledgement can remain pending until a usable callback arrives. Device fault/recovery state and broader period handling remain roadmap work.
+Callback processing performs no allocation, free, resizing, decoding or I/O. The integer oversized-buffer policy is explicit silence plus an error, not transparent recovery or gap-free variable-period support. Metadata/control acknowledgement can remain pending until a usable callback arrives. Failed-stream isolation and manual stop/restart are described below. Broader period handling and automatic recovery remain roadmap work.
+
+## Output failure lifecycle
+
+The CPAL stream owns a sticky atomic failure flag shared with its error callback and a guard around the engine callback. Device loss, stream invalidation and other errors requiring rebuild set the flag before notifying the existing backend-error sink. CPAL's Xrun, DeviceChanged and RealtimeDenied notifications keep the stream active. These notifications remain included in driver/backend metrics. This classification deliberately treats all remaining and future unknown error kinds as requiring an explicit restart.
+
+After a callback observes the flag, it emits silence and skips the engine. F32 and I16 silence is zero, and U16 silence is 32768. Transport, voices, graph adoption, ramps and readiness commands receive no further engine callbacks on that stream. An already executing callback can finish when an error arrives concurrently. The flag and guard use atomic loads/stores and existing prepared buffers without callback allocation, free, locks or I/O.
+
+`AudioOutputStream::is_faulted()` exposes stream health with a default false implementation for existing adapters. Native `DawApplication::state()` returns Faulted when the stream reports failure. Publication status includes `outputFaulted`; preview reports false. Start on that failed session and new Transport requests return errors. Failed output retains its original selected configuration for inspection. A DeviceChanged notification retains the original selection report until the stream is reopened; live route metadata refresh is follow-up work.
+
+Project edits, Undo/Redo and saves remain available in the faulted session. Such edits update the Rust document/history and defer new graph preparation until restart. Previously queued preparation may finish; the failed callback guard prevents subsequent adoption. Pending receipts remain inspectable until Stop releases the session. Durable shutdown outcomes are follow-up work.
+
+The persistent three-language notice offers Stop audio. CPAL Stop skips pause on a known failed device and releases the stream through the existing control-thread cleanup. Restart opens a fresh stream with a fresh flag and engine epoch, prepares the latest document and rejects old-epoch Transport IDs. This explicit stop/restart follows the existing initial Transport-position behavior. The implementation currently relies on user-triggered restart.
+
+A failure detected during startup returns an error before committing the stream/control/epoch. The initialized document and history remain available for retry. UI Transport controls disable during the fault while the stop/power controls remain usable. The recovery banner is layered above the narrow-screen Browser panel.
+
+## Safety stop and Transport receipts when audio is unavailable
+
+Backend buffer rejection and failed-stream callbacks invoke `AudioCallback::output_unavailable()` on the same output thread as `process`. The hook is allocation-free and serialized with rendering. Existing callback implementations receive a default no-op hook. CPAL calls it for malformed F32 frames, malformed/oversized converted output, and callbacks gated by a failed stream.
+
+The engine applies its out-of-band Stop barrier, stops Transport without advancing position, cancels stream requests and settles queued/waiting Transport commands with `OutputUnavailable`. Explicit cancellation already requested retains its reason. A Stop actually handled by the engine is reported as applied. A later valid callback can accept fresh commands after a transient buffer rejection. Direct malformed engine buffers retain the earlier normal-command hold policy and still apply safety Stop.
+
+Confirmed stream failure sets a sticky engine admission flag through control-side status service. Result queries scan the bounded receipt store with atomic result guards and cancel unfinished commands even if audio callbacks cease. Previously terminal results are preserved. A receipt being written concurrently is retried on subsequent status service. Callbacks check the failure flag before rendering and stop at their next admission check. An executing callback may complete before observing failure.
+
+The control-side snapshot reports playback/recording stopped. Unexecuted Stop commands receive the unavailable cancellation outcome when engine callbacks have ceased. Result metadata retains any earlier applied effect, and settlement never rolls it back. Transport/result/cancellation queries remain available during failure so UI polling can obtain the fault and receipt notifications. Source failure notices and the existing error counters continue separately.
+
+Receipt retention remains bounded to the current engine session. Stop/disposal and restart follow the existing epoch policy. Durable receipt history across disposal and graph publication shutdown outcomes remain follow-up work.
 
 ## Evidence and remaining work
 
@@ -51,5 +77,5 @@ Pure capability tests cover rate/channel/format selection, buffer endpoints, unk
 
 Callback tests verify exact sample boundaries, non-finite handling, unsigned equilibrium, malformed/oversized buffers, recovery, empty callbacks and cleared scratch. Allocation instrumentation observes zero allocations/frees in F32, I16 and U16 normal/fault processing. See [P0 validation](P0_VALIDATION.md) for workspace results and commands.
 
-- 🟠 [Next] Physical rate/wake-up observations, bounded variable-period handling, broader encodings/resource budgets, serialized device recovery and automatic fault handling.
+- 🟠 [Next] Physical rate/wake-up observations, bounded variable-period handling, broader encodings/resource budgets, device enumeration/route refresh, automatic recovery and sleep/wake handling.
 - ⭕️ [Pending] Actual macOS/Windows/Linux device matrices, unplug/default-device changes, loopback/listening, physical latency and endurance. Software fixtures do not establish real-driver behavior.

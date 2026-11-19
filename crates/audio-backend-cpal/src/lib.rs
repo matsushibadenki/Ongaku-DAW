@@ -9,6 +9,11 @@ use audio_backend::{AudioBackend, AudioCallback, AudioOutputStream};
 use audio_types::{
     AudioConfig, AudioDeviceInfo, AudioError, OutputConfiguration, OutputSampleFormat,
 };
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
+
 use cpal::{
     BufferSize, SampleRate, Stream, StreamConfig,
     traits::{DeviceTrait, HostTrait, StreamTrait},
@@ -90,8 +95,14 @@ impl AudioBackend for CpalAudioBackend {
             sample_rate: config.sample_rate as SampleRate,
             buffer_size: BufferSize::Fixed(config.buffer_size),
         };
+        let faulted = Arc::new(AtomicBool::new(false));
+        let callback = Box::new(boundary::FaultGuard::new(callback, Arc::clone(&faulted)));
+        let error_faulted = Arc::clone(&faulted);
         let event_sink = callback.event_sink();
-        let error_callback = move |_error: cpal::Error| {
+        let error_callback = move |error: cpal::Error| {
+            if requires_rebuild(error.kind()) {
+                error_faulted.store(true, Ordering::Release);
+            }
             if let Some(sink) = &event_sink {
                 sink.report_backend_error();
             }
@@ -112,6 +123,7 @@ impl AudioBackend for CpalAudioBackend {
             stream,
             running: false,
             output,
+            faulted,
         }))
     }
 }
@@ -198,13 +210,23 @@ struct CpalOutputStream {
     stream: Stream,
     running: bool,
     output: OutputConfiguration,
+    faulted: Arc<AtomicBool>,
 }
 
 impl AudioOutputStream for CpalOutputStream {
+    fn is_faulted(&self) -> bool {
+        self.faulted.load(Ordering::Acquire)
+    }
+
     fn output_configuration(&self) -> Option<OutputConfiguration> {
         Some(self.output.clone())
     }
     fn start(&mut self) -> Result<(), AudioError> {
+        if self.is_faulted() {
+            return Err(AudioError::InvalidState(
+                "output stream failed; stop and restart the engine",
+            ));
+        }
         if !self.running {
             self.stream.play().map_err(backend_error)?;
             self.running = true;
@@ -213,6 +235,12 @@ impl AudioOutputStream for CpalOutputStream {
     }
 
     fn stop(&mut self) -> Result<(), AudioError> {
+        // Failed devices may reject pause. Dropping the stream on the control
+        // thread releases it and allows a new selected device to be opened.
+        if self.is_faulted() {
+            self.running = false;
+            return Ok(());
+        }
         if self.running {
             self.stream.pause().map_err(backend_error)?;
             self.running = false;
@@ -221,6 +249,38 @@ impl AudioOutputStream for CpalOutputStream {
     }
 }
 
+fn requires_rebuild(kind: cpal::ErrorKind) -> bool {
+    !matches!(
+        kind,
+        cpal::ErrorKind::Xrun | cpal::ErrorKind::DeviceChanged | cpal::ErrorKind::RealtimeDenied
+    )
+}
+
 fn backend_error(error: impl std::fmt::Display) -> AudioError {
     AudioError::Backend(error.to_string())
+}
+
+#[cfg(test)]
+mod lifecycle_tests {
+    use super::*;
+    #[test]
+    fn only_stream_continuing_notifications_avoid_quarantine() {
+        for kind in [
+            cpal::ErrorKind::Xrun,
+            cpal::ErrorKind::DeviceChanged,
+            cpal::ErrorKind::RealtimeDenied,
+        ] {
+            assert!(!requires_rebuild(kind));
+        }
+        for kind in [
+            cpal::ErrorKind::DeviceNotAvailable,
+            cpal::ErrorKind::StreamInvalidated,
+            cpal::ErrorKind::HostUnavailable,
+            cpal::ErrorKind::PermissionDenied,
+            cpal::ErrorKind::BackendError,
+            cpal::ErrorKind::Other,
+        ] {
+            assert!(requires_rebuild(kind));
+        }
+    }
 }

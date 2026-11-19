@@ -246,6 +246,33 @@ impl EngineControl {
         self.metrics.snapshot()
     }
 
+    /// Control-thread settlement for a backend that has ceased calling audio.
+    pub fn settle_output_failure(&self) {
+        self.transport_receipts
+            .output_failed
+            .store(true, Ordering::SeqCst);
+        let end = self.transport_receipts.accepted.load(Ordering::SeqCst);
+        let position = self.transport.snapshot().current_sample;
+        for id in end
+            .saturating_sub(TRANSPORT_HISTORY_CAPACITY as u64 - 1)
+            .max(1)..=end
+        {
+            if let Some(mut guard) = self.transport_receipts.begin(id)
+                && !guard.result.state.terminal()
+            {
+                let reason = if guard.result.state == TransportCommandState::CancelPending {
+                    TransportCancelReason::Explicit
+                } else {
+                    TransportCancelReason::OutputUnavailable
+                };
+                guard.result.state = TransportCommandState::Canceled;
+                guard.result.cancel_reason = Some(reason);
+                guard.result.readiness = StreamReadiness::default();
+                guard.result.resolved_sample = Some(position);
+            }
+        }
+    }
+
     pub fn submit_graph(&self, graph: EngineGraph) -> Result<(), AudioError> {
         self.submit_graph_revision(graph, 0, None).map(|_| ())
     }
@@ -381,9 +408,15 @@ impl EngineControl {
     /// Stop remains out of band and never takes the normal producer mutex.
     pub fn submit_transport(&self, command: TransportCommand) -> Result<u64, AudioError> {
         transport_protocol::validate(command)?;
+        if self.transport_receipts.output_failed.load(Ordering::SeqCst) {
+            return Err(AudioError::InvalidState("output unavailable"));
+        }
         if command == TransportCommand::Stop {
-            let id = self.transport_receipts.accept(command).map_err(|_| {
+            let id = self.transport_receipts.accept(command).map_err(|error| {
                 self.transport.emergency_stop.store(true, Ordering::Release);
+                if self.transport_receipts.output_failed.load(Ordering::SeqCst) {
+                    return error;
+                }
                 AudioError::InvalidState(
                     "transport IDs exhausted; safety Stop requested; restart the engine",
                 )
@@ -457,7 +490,12 @@ impl EngineControl {
 
     #[must_use]
     pub fn transport(&self) -> TransportSnapshot {
-        self.transport.snapshot()
+        let mut snapshot = self.transport.snapshot();
+        if self.transport_receipts.output_failed.load(Ordering::SeqCst) {
+            snapshot.playing = false;
+            snapshot.recording = false;
+        }
+        snapshot
     }
 
     pub fn reclaim_retired(&self) -> Result<usize, AudioError> {
@@ -563,7 +601,24 @@ impl EngineProcessor {
     }
 
     /// Allocation-free and lock-free processing for an interleaved output block.
+    #[allow(clippy::too_many_lines)] // Keep callback admission, rendering and receipt ordering together.
     pub fn process_block(&mut self, output: &mut [f32]) {
+        if self.transport_receipts.output_failed.load(Ordering::SeqCst) {
+            output.fill(0.0);
+            self.output_unavailable();
+            return;
+        }
+        if !output
+            .len()
+            .is_multiple_of(usize::from(self.config.channels))
+        {
+            output.fill(0.0);
+            self.apply_stop_barrier();
+            self.shared_transport.publish(self.transport.snapshot());
+            self.metrics
+                .report_output_fault(audio_types::OutputFault::MalformedFrame);
+            return;
+        }
         let started = std::time::Instant::now();
         let previous_transport = self.transport.snapshot();
         self.apply_stop_barrier();
@@ -573,6 +628,11 @@ impl EngineProcessor {
                 break;
             };
             self.apply_transport_request(request);
+        }
+        if self.transport_receipts.output_failed.load(Ordering::SeqCst) {
+            output.fill(0.0);
+            self.output_unavailable();
+            return;
         }
         // A stop arriving during command draining still wins before rendering this block.
         self.apply_stop_barrier();
@@ -715,6 +775,9 @@ impl EngineProcessor {
         if let Some(id) = self.pending_transport.take()
             && let Some(mut guard) = self.transport_receipts.begin(id)
         {
+            if guard.result.state.terminal() {
+                return;
+            }
             let reason = if guard.result.state == TransportCommandState::CancelPending {
                 TransportCancelReason::Explicit
             } else {
@@ -751,6 +814,12 @@ impl EngineProcessor {
         let mut receipt = protocol.begin(request.id);
         if receipt
             .as_ref()
+            .is_some_and(|guard| guard.result.state.terminal())
+        {
+            return;
+        }
+        if receipt
+            .as_ref()
             .is_some_and(|guard| guard.result.state == TransportCommandState::CancelPending)
         {
             if let Some(guard) = &mut receipt {
@@ -762,6 +831,9 @@ impl EngineProcessor {
                     self.transport_generation,
                 );
             }
+            return;
+        }
+        if self.transport_receipts.output_failed.load(Ordering::SeqCst) {
             return;
         }
         let starts = matches!(
@@ -906,6 +978,44 @@ impl EngineProcessor {
 impl AudioCallback for EngineProcessor {
     fn process(&mut self, output: &mut [f32]) {
         self.process_block(output);
+    }
+
+    fn output_unavailable(&mut self) {
+        self.apply_stop_barrier();
+        if self.transport.snapshot().playing || self.transport.snapshot().recording {
+            self.transport_generation = self
+                .transport_generation
+                .saturating_add(1)
+                .min(MAX_PUBLICATION_REVISION);
+        }
+        self.transport.apply(TransportCommand::Stop);
+        self.resolve_pending(TransportCancelReason::OutputUnavailable);
+        self.graph.cancel_streaming();
+        for _ in 0..TRANSPORT_QUEUE_CAPACITY {
+            let Ok(request) = self.transport_commands.pop() else {
+                break;
+            };
+            if let Some(mut guard) = self.transport_receipts.begin(request.id)
+                && !guard.result.state.terminal()
+            {
+                let reason = if guard.result.state == TransportCommandState::CancelPending {
+                    TransportCancelReason::Explicit
+                } else {
+                    TransportCancelReason::OutputUnavailable
+                };
+                Self::canceled(
+                    &mut guard.result,
+                    reason,
+                    self.transport.snapshot().current_sample,
+                    self.active_graph_revision,
+                    self.transport_generation,
+                );
+            }
+        }
+        self.shared_transport.publish(self.transport.snapshot());
+        self.shared_transport
+            .stop_applied
+            .store(self.applied_stop_generation, Ordering::Release);
     }
 
     fn event_sink(&self) -> Option<Arc<dyn RealtimeEventSink>> {
@@ -1184,6 +1294,34 @@ mod tests {
         assert!(output.iter().all(|sample| (*sample - 0.25).abs() < 1.0e-6));
         assert_eq!(control.transport().current_sample, SamplePosition(64));
         assert_eq!(control.reclaim_retired().unwrap(), 1);
+    }
+
+    #[test]
+    fn unavailable_output_settlement_remains_allocation_free() {
+        let config = AudioConfig::DEFAULT;
+        let (mut engine, control) = EngineProcessor::prepare(config).unwrap();
+        control
+            .submit_graph(timeline_graph(config, 0.25, 128))
+            .unwrap();
+        control.send_transport(TransportCommand::Play).unwrap();
+        engine.process_block(&mut [0.0; 4]);
+        let id = control
+            .submit_transport(TransportCommand::Seek(SamplePosition(90)))
+            .unwrap();
+        let before = REALTIME_MEMORY_EVENTS.load(Ordering::Relaxed);
+        IN_REALTIME_TEST.with(|flag| flag.set(true));
+        audio_backend::AudioCallback::output_unavailable(&mut engine);
+        IN_REALTIME_TEST.with(|flag| flag.set(false));
+        assert_eq!(REALTIME_MEMORY_EVENTS.load(Ordering::Relaxed), before);
+        assert_eq!(
+            control
+                .transport_command_status(id)
+                .unwrap()
+                .result
+                .unwrap()
+                .cancel_reason,
+            Some(crate::TransportCancelReason::OutputUnavailable)
+        );
     }
 
     #[test]
@@ -1650,3 +1788,121 @@ mod p0_regressions {
 
 #[cfg(test)]
 mod coalescing_tests;
+
+#[cfg(test)]
+mod frame_integrity_tests {
+    use super::*;
+    #[test]
+    fn safety_stop_applies_on_malformed_blocks_without_advancing_the_clock() {
+        let (mut engine, control) = EngineProcessor::prepare(AudioConfig::DEFAULT).unwrap();
+        control.send_transport(TransportCommand::Play).unwrap();
+        engine.process_block(&mut [0.0; 4]);
+        let position = control.transport().current_sample;
+        control.send_transport(TransportCommand::Stop).unwrap();
+        engine.process_block(&mut [1.0; 3]);
+        assert!(!control.transport().playing);
+        assert_eq!(control.transport().current_sample, position);
+        engine.process_block(&mut [0.0; 4]);
+        assert!(!control.transport().playing);
+        assert_eq!(control.transport().current_sample, position);
+    }
+
+    #[test]
+    fn malformed_blocks_hold_commands_and_clock_until_a_complete_frame_arrives() {
+        let (mut engine, control) = EngineProcessor::prepare(AudioConfig::DEFAULT).unwrap();
+        control.send_transport(TransportCommand::Play).unwrap();
+        let mut malformed = [1.0; 3];
+        engine.process_block(&mut malformed);
+        assert_eq!(malformed.map(f32::to_bits), [0; 3]);
+        assert!(!control.transport().playing);
+        assert_eq!(control.transport().current_sample.0, 0);
+        assert_eq!(control.metrics().output.malformed_frame_count, 1);
+        engine.process_block(&mut [0.0; 4]);
+        assert!(control.transport().playing);
+        assert_eq!(control.transport().current_sample.0, 2);
+    }
+}
+
+#[cfg(test)]
+mod unavailable_tests {
+    use super::*;
+    #[test]
+    fn rejected_output_stops_and_resolves_commands_without_rendering() {
+        let (mut engine, control) = EngineProcessor::prepare(AudioConfig::DEFAULT).unwrap();
+        control.send_transport(TransportCommand::Play).unwrap();
+        engine.process_block(&mut [0.0; 4]);
+        let position = control.transport().current_sample;
+        let seek = control
+            .submit_transport(TransportCommand::Seek(daw_core::SamplePosition(900)))
+            .unwrap();
+        let stop = control.submit_transport(TransportCommand::Stop).unwrap();
+        engine.output_unavailable();
+        assert!(!control.transport().playing);
+        assert_eq!(control.transport().current_sample, position);
+        assert_eq!(
+            control
+                .transport_command_status(seek)
+                .unwrap()
+                .result
+                .unwrap()
+                .cancel_reason,
+            Some(TransportCancelReason::OutputUnavailable)
+        );
+        assert_eq!(
+            control
+                .transport_command_status(stop)
+                .unwrap()
+                .result
+                .unwrap()
+                .state,
+            TransportCommandState::Applied
+        );
+        engine.process_block(&mut [0.0; 4]);
+        assert_eq!(control.transport().current_sample, position);
+        control.send_transport(TransportCommand::Play).unwrap();
+        engine.process_block(&mut [0.0; 4]);
+        assert!(control.transport().playing);
+    }
+    #[test]
+    fn missing_callbacks_still_allow_terminal_failure_receipts() {
+        let (mut engine, control) = EngineProcessor::prepare(AudioConfig::DEFAULT).unwrap();
+        let applied = control
+            .submit_transport(TransportCommand::SetTempo(140.0))
+            .unwrap();
+        engine.process_block(&mut [0.0; 4]);
+        let play = control.submit_transport(TransportCommand::Play).unwrap();
+        let stop = control.submit_transport(TransportCommand::Stop).unwrap();
+        control.settle_output_failure();
+        assert_eq!(
+            control
+                .transport_command_status(play)
+                .unwrap()
+                .result
+                .unwrap()
+                .cancel_reason,
+            Some(TransportCancelReason::OutputUnavailable)
+        );
+        assert_eq!(
+            control
+                .transport_command_status(stop)
+                .unwrap()
+                .result
+                .unwrap()
+                .state,
+            TransportCommandState::Canceled
+        );
+        assert_eq!(
+            control
+                .transport_command_status(applied)
+                .unwrap()
+                .result
+                .unwrap()
+                .state,
+            TransportCommandState::Applied
+        );
+        assert!(control.submit_transport(TransportCommand::Play).is_err());
+        engine.process_block(&mut [1.0; 4]);
+        assert!(!control.transport().playing);
+        assert_eq!(control.transport().current_sample.0, 0);
+    }
+}

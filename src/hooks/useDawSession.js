@@ -216,7 +216,7 @@ export function useDawSession(unavailableMessage) {
 
   return {
     devices, deviceId, setDeviceId, config, project, projectEpoch, transport, metrics, documentStatus,
-    running, busy, error, setError, publicationStatus, timingWarning, dismissTimingWarning: () => setTimingWarning(""), toggleEngine, togglePlayback, stopPlayback, seek, toggleLoop,
+    running, busy, error, setError, publicationStatus, timingWarning, dismissTimingWarning: () => setTimingWarning(""), toggleEngine, stopEngine, togglePlayback, stopPlayback, seek, toggleLoop,
     undo: () => documentAction("undo"), redo: () => documentAction("redo"),
     saveProject: (saveAs = false) => documentAction("save", saveAs),
     loadProject: () => documentAction("open"),
