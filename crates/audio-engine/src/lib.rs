@@ -526,6 +526,7 @@ pub struct EngineProcessor {
     transport_commands: Consumer<TransportRequest>,
     transport: Transport,
     applied_stop_generation: u64,
+    unavailable_through: u64,
     shared_transport: Arc<SharedTransport>,
     readiness: Arc<ReadinessReceipt>,
     active_graph_revision: u64,
@@ -568,6 +569,7 @@ impl EngineProcessor {
             transport_commands: transport_consumer,
             transport: Transport::new(config.sample_rate),
             applied_stop_generation: 0,
+            unavailable_through: 0,
             shared_transport: Arc::clone(&shared_transport),
             readiness: Arc::clone(&readiness),
             active_graph_revision: 0,
@@ -836,6 +838,18 @@ impl EngineProcessor {
         if self.transport_receipts.output_failed.load(Ordering::SeqCst) {
             return;
         }
+        if request.id <= self.unavailable_through {
+            if let Some(guard) = &mut receipt {
+                Self::canceled(
+                    &mut guard.result,
+                    TransportCancelReason::OutputUnavailable,
+                    self.transport.snapshot().current_sample,
+                    self.active_graph_revision,
+                    self.transport_generation,
+                );
+            }
+            return;
+        }
         let starts = matches!(
             request.command,
             TransportCommand::Play | TransportCommand::SetRecording(true)
@@ -981,6 +995,9 @@ impl AudioCallback for EngineProcessor {
     }
 
     fn output_unavailable(&mut self) {
+        self.unavailable_through = self
+            .unavailable_through
+            .max(self.transport_receipts.accepted.load(Ordering::SeqCst));
         self.apply_stop_barrier();
         if self.transport.snapshot().playing || self.transport.snapshot().recording {
             self.transport_generation = self
@@ -1863,6 +1880,39 @@ mod unavailable_tests {
         engine.process_block(&mut [0.0; 4]);
         assert!(control.transport().playing);
     }
+    #[test]
+    fn accepted_before_rejection_cannot_restart_audio_when_enqueued_late() {
+        let (mut engine, control) = EngineProcessor::prepare(AudioConfig::DEFAULT).unwrap();
+        let id = control
+            .transport_receipts
+            .accept(TransportCommand::Play)
+            .unwrap();
+        engine.output_unavailable();
+        assert!(
+            control
+                .transport_commands
+                .lock()
+                .unwrap()
+                .push(TransportRequest {
+                    id,
+                    command: TransportCommand::Play,
+                    stop_generation: 0,
+                })
+                .is_ok()
+        );
+        engine.process_block(&mut [0.0; 4]);
+        assert!(!control.transport().playing);
+        assert_eq!(
+            control
+                .transport_command_status(id)
+                .unwrap()
+                .result
+                .unwrap()
+                .cancel_reason,
+            Some(TransportCancelReason::OutputUnavailable)
+        );
+    }
+
     #[test]
     fn missing_callbacks_still_allow_terminal_failure_receipts() {
         let (mut engine, control) = EngineProcessor::prepare(AudioConfig::DEFAULT).unwrap();

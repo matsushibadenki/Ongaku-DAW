@@ -364,12 +364,14 @@ impl TestGate {
     }
     pub(super) fn wait(&self) {
         // Deadlock guard, not a latency gate: callers can save/load PCM while held.
-        // Parallel workspace tests can legitimately spend over five seconds in that I/O.
+        // PCM save/load can exceed 30 seconds on a loaded development machine.
         let (open, _) = self
             .wake
-            .wait_timeout_while(self.open.lock().unwrap(), Duration::from_secs(30), |open| {
-                !*open
-            })
+            .wait_timeout_while(
+                self.open.lock().unwrap(),
+                Duration::from_secs(300),
+                |open| !*open,
+            )
             .unwrap();
         assert!(*open, "preparation fixture gate timed out");
     }

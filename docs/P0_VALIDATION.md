@@ -490,3 +490,13 @@ Regression coverage includes Play/Stop/backend rejection, no-callback settlement
 🟠 [Next] Durable results across engine disposal and graph publication shutdown outcomes. Existing current-session retention and epoch invalidation still apply.
 
 ⭕️ [Pending] Actual driver rejection/unplug races, physical loopback and cross-platform endurance. Ongaku contracts and independent fixtures were used throughout.
+
+The pre-existing preparation cancellation fixture hit its 30-second test gate in both parallel and isolated Release runs while performing PCM save/load. An isolated run took approximately 94 seconds. The test-only deadlock guard now allows 300 seconds for this I/O-inclusive section, and the application Release suite is checked serially. This guard is independent of the engine callback deadline and provides no playback-performance measurement.
+
+JavaScript `node --test tests/*.test.mjs` passes eleven cases, including the localized output-unavailable reason, and `npm run build` passes. Rust checks use toolchain 1.93.0 offline Cargo. Verification includes workspace Debug, affected engine/CPAL/application tests in Debug/Release, workspace Clippy, formatting and whitespace checks.
+
+The final engine fixture also pauses command production between acceptance and queue insertion. A request accepted before the unavailable-output notification remains canceled if enqueued afterward. A processor-local accepted-ID cutoff prevents that late Play from restarting audio. Fresh requests after transient rejection can run on the next valid block.
+
+Final affected Release verification passes 53 engine tests, 10 CPAL tests and 29 application tests (92 total). The application suite runs serially after the fixture deadlock-guard adjustment and passes in 83.72 seconds. Engine Debug also passes 53 tests. Workspace Clippy retains the existing project/MIDI warnings, with no new backend, engine or application warnings. Formatting, whitespace and documentation-link checks pass.
+
+Final workspace Debug verification passes 197 tests with the accepted-ID cutoff and adjusted test guard in place.

@@ -309,9 +309,10 @@ Evidence and reproducible commands: [P0 validation record](docs/P0_VALIDATION.md
 
 ### Twenty-first implementation batch — backend rejection and Transport settlement (2026-11-19)
 
-- 🟢 [Done] Backends can call a serialized, allocation-free `output_unavailable` hook when rejecting malformed/oversized output or quarantining failed callbacks. The engine applies safety Stop, freezes musical position and resolves queued/waiting Transport commands with `OutputUnavailable`. Stop receipts executed by the engine retain their applied result.
+- 🟢 [Done] Backends can call a serialized, allocation-free `output_unavailable` hook when rejecting malformed/oversized output or quarantining failed callbacks. The engine applies safety Stop, freezes musical position and resolves queued/waiting Transport commands with `OutputUnavailable`. Stop receipts executed by the engine retain their applied result. An accepted-ID cutoff prevents requests accepted before rejection from restarting audio when enqueued late.
 - 🟢 [Done] Confirmed stream failure also settles retained unfinished receipts on the control thread, including when callbacks cease entirely. Applied results retain their outcome and partial application metadata remains available. The failed engine rejects new Transport acceptance until a new epoch is prepared.
 - 🟢 [Done] Failure-time Transport/result queries remain operational for UI polling. The output-unavailable reason is localized through the existing fault strings. Regression fixtures cover rejected buffers, absent callbacks, preserved applied results, terminal result stability, recovery and callback allocation/free behavior.
+- 🟢 [Done] Final workspace Debug passes 197 tests. Affected Release verification passes 92 tests across engine, CPAL and application suites. Eleven JavaScript tests and the production build pass. The I/O-inclusive test deadlock guard was extended to 300 seconds after a 94-second isolated save/load run.
 - 🟠 [Next] Durable results across engine disposal, graph publication shutdown outcomes and physical device recovery qualification.
 - ⭕️ [Pending] Real-driver rejection, unplug races, listening/loopback and cross-platform endurance.
 
